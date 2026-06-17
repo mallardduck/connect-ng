@@ -21,6 +21,7 @@ type RegistrationHandler interface {
 	NeedsActivation(ctx context.Context, obj types.ProductRegistrationObject) bool
 	ReadyForActivation(ctx context.Context, obj types.ProductRegistrationObject) bool
 	NeedsKeepalive(ctx context.Context, obj types.ProductRegistrationObject) bool
+	NeedsPreprocessRegistration(ctx context.Context, obj types.ProductRegistrationObject) bool
 
 	// Preparation Methods - set up state before operations
 
@@ -28,6 +29,18 @@ type RegistrationHandler interface {
 	PrepareRegisteredForActivation(ctx context.Context, obj types.ProductRegistrationObject) (types.ProductRegistrationObject, error)
 	PrepareActivatedForKeepalive(ctx context.Context, obj types.ProductRegistrationObject) (types.ProductRegistrationObject, error)
 	PrepareKeepaliveSucceeded(ctx context.Context, obj types.ProductRegistrationObject) (types.ProductRegistrationObject, error)
+
+	// Preprocessing Methods - handle edge cases like user removing failed certificates
+
+	// PreprocessRegistration handles preprocessing when user removes certificates or resets state.
+	// Offline: Resets to ReadyForActivation when user removes cert to retry.
+	// Online: Currently no-op (future use).
+	PreprocessRegistration(ctx context.Context, obj types.ProductRegistrationObject) (types.ProductRegistrationObject, error)
+
+	// ResetToReadyForActivation resets the registration state to allow re-activation.
+	// Used when syncNow is triggered on a failed activation, or when user removes failed offline cert.
+	// Clears activation status and failure conditions, sets Progressing condition.
+	ResetToReadyForActivation(ctx context.Context, obj types.ProductRegistrationObject) (types.ProductRegistrationObject, error)
 
 	// Operation Methods - perform SCC interactions
 

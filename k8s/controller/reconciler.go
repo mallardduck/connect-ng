@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -14,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/SUSE/connect-ng/k8s/consts"
 	"github.com/SUSE/connect-ng/k8s/types"
 )
 
@@ -119,6 +121,33 @@ func (r *RegistrationReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
+	// Handle deletion with finalizer
+	if !obj.GetDeletionTimestamp().IsZero() {
+		if containsString(obj.GetFinalizers(), consts.FinalizerRegistration) {
+			// Cleanup secrets created by this ProductRegistration
+			log.Info("ProductRegistration being deleted, cleaning up secrets")
+			if err := r.cleanupSecrets(ctx, obj); err != nil {
+				log.Error(err, "failed to cleanup secrets")
+				return ctrl.Result{}, err
+			}
+
+			// Remove finalizer
+			obj.SetFinalizers(removeString(obj.GetFinalizers(), consts.FinalizerRegistration))
+			if err := r.Update(ctx, obj.(client.Object)); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{}, nil
+	}
+
+	// Add finalizer if not present
+	if !containsString(obj.GetFinalizers(), consts.FinalizerRegistration) {
+		obj.SetFinalizers(append(obj.GetFinalizers(), consts.FinalizerRegistration))
+		if err := r.Update(ctx, obj.(client.Object)); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
 	// obj already implements types.ProductRegistrationObject - use it directly!
 	// No wrapper needed - this is the beauty of the prototype pattern
 	result, err := r.reconcileRegistration(ctx, obj)
@@ -141,28 +170,73 @@ func (r *RegistrationReconciler) reconcileRegistration(
 	status := regObj.GetStatus()
 
 	// Create handler based on current mode (per-reconcile pattern)
-	handler := r.createHandler(ctx, regObj, spec.GetMode())
+	handler := createHandler(ctx, regObj, spec.GetMode(), r.handlerConfig)
+
+	// Handle preprocessing before main state machine
+	// This handles edge cases like user removing offline certificate to retry activation
+	if handler.NeedsPreprocessRegistration(ctx, regObj) {
+		log.Info("Preprocessing registration (user removed certificate or resetting state)")
+
+		preparedObj, err := handler.PreprocessRegistration(ctx, regObj)
+		if err != nil {
+			log.Error(err, "failed to preprocess registration")
+			return ctrl.Result{}, err
+		}
+		regObj = preparedObj
+
+		// Save preprocessing changes
+		if err := r.updateStatus(ctx, regObj); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to update status after preprocessing: %w", err)
+		}
+
+		// Also update spec if needed (syncNow flag might have been cleared)
+		if err := r.Update(ctx, regObj.(client.Object)); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to update after preprocessing: %w", err)
+		}
+
+		// Requeue to process the new state
+		return ctrl.Result{Requeue: true}, nil
+	}
 
 	// Check for syncNow trigger from lifecycle manager
 	// This is how the jitter-based keepalive system triggers daily checkins
+	// Also used to reset/retry failed activations
 	if spec.GetSyncNow() {
-		log.Info("syncNow triggered by lifecycle manager")
+		log.Info("syncNow triggered")
 
 		// Clear the syncNow flag immediately
 		spec.SetSyncNow(false)
-		if err := r.Update(ctx, regObj.(client.Object)); err != nil {
-			log.Error(err, "failed to clear syncNow flag")
-			return ctrl.Result{}, err
-		}
 
 		// If system is activated, run keepalive
 		if status.GetActivated() {
 			log.Info("Running keepalive due to syncNow trigger")
+			if err := r.Update(ctx, regObj.(client.Object)); err != nil {
+				log.Error(err, "failed to clear syncNow flag")
+				return ctrl.Result{}, err
+			}
 			return r.doKeepalive(ctx, regObj, handler)
 		}
 
-		// If not activated yet, continue with normal state machine
-		log.V(1).Info("syncNow set but system not activated, continuing normal flow")
+		// If not activated, reset to ReadyForActivation for retry
+		// This allows user to trigger re-activation via syncNow
+		log.Info("syncNow triggered on non-activated registration, resetting to ReadyForActivation")
+		resetObj, err := handler.ResetToReadyForActivation(ctx, regObj)
+		if err != nil {
+			log.Error(err, "failed to reset registration")
+			return ctrl.Result{}, err
+		}
+		regObj = resetObj
+
+		// Save changes
+		if err := r.updateStatus(ctx, regObj); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to update status after reset: %w", err)
+		}
+		if err := r.Update(ctx, regObj.(client.Object)); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to update after reset: %w", err)
+		}
+
+		// Requeue to process activation
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	// State machine: NeedsRegistration → Register → NeedsActivation → Activate → NeedsKeepalive → Keepalive
@@ -194,19 +268,6 @@ func (r *RegistrationReconciler) reconcileRegistration(
 	// 4. All good - no requeue needed, lifecycle manager handles scheduled keepalives
 	log.V(1).Info("System is healthy", "systemID", status.GetSCCSystemID(), "activated", status.GetActivated())
 	return ctrl.Result{}, nil
-}
-
-// createHandler creates the appropriate handler based on mode.
-// Handlers are created per-reconcile (matches scc-operator pattern).
-func (r *RegistrationReconciler) createHandler(
-	ctx context.Context,
-	obj types.ProductRegistrationObject,
-	mode types.RegistrationMode,
-) RegistrationHandler {
-	if mode == types.RegistrationModeOffline {
-		return NewOfflineHandler(ctx, obj, r.handlerConfig)
-	}
-	return NewOnlineHandler(ctx, obj, r.handlerConfig)
 }
 
 // doRegistration performs the registration operation.
@@ -363,6 +424,42 @@ func (r *RegistrationReconciler) updateStatus(
 	// Update the status subresource
 	if err := r.Status().Update(ctx, regObj.(client.Object)); err != nil {
 		return fmt.Errorf("failed to update status: %w", err)
+	}
+
+	return nil
+}
+
+// cleanupSecrets removes secrets created by this ProductRegistration
+func (r *RegistrationReconciler) cleanupSecrets(ctx context.Context, obj types.ProductRegistrationObject) error {
+	log := log.FromContext(ctx)
+	status := obj.GetStatus()
+
+	// Delete SCC credentials secret if it exists
+	if credRef := status.GetSystemCredentialsSecretRef(); credRef != nil {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      credRef.Name,
+				Namespace: credRef.Namespace,
+			},
+		}
+		if err := r.Delete(ctx, secret); err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("failed to delete credentials secret: %w", err)
+		}
+		log.Info("deleted SCC credentials secret", "name", credRef.Name, "namespace", credRef.Namespace)
+	}
+
+	// Delete offline request secret if it exists
+	if offlineRef := status.GetOfflineRegistrationRequestRef(); offlineRef != nil {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      offlineRef.Name,
+				Namespace: offlineRef.Namespace,
+			},
+		}
+		if err := r.Delete(ctx, secret); err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("failed to delete offline request secret: %w", err)
+		}
+		log.Info("deleted offline request secret", "name", offlineRef.Name, "namespace", offlineRef.Namespace)
 	}
 
 	return nil

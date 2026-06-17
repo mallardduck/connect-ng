@@ -5,6 +5,8 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
+	"maps"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -15,9 +17,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	connectngv1 "github.com/SUSE/connect-ng/k8s/api/v1"
+	"github.com/SUSE/connect-ng/k8s/consts"
+	"github.com/SUSE/connect-ng/k8s/util/salt"
 )
 
-// EntrypointReconciler watches the entrypoint secret and creates/updates ProductRegistration CRs
+// EntrypointReconciler watches the entrypoint secret and creates/updates ProductRegistration CRs.
+// Based on SCC Operator's entrypoint reconciliation pattern in resources.go.
 type EntrypointReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -31,11 +36,16 @@ type EntrypointReconciler struct {
 	// EntrypointNamespace is the namespace of the entrypoint secret
 	EntrypointNamespace string
 
-	// ProductName is used for naming child resources
+	// ProductName is used for naming child resources and managed-by labels
 	ProductName string
 }
 
-// Reconcile handles entrypoint secret changes and creates/updates ProductRegistration CRs
+// Reconcile handles entrypoint secret changes and creates/updates ProductRegistration CRs.
+// Follows SCC Operator's pattern:
+// 1. Extract params from entrypoint secret (with salt-based hashing)
+// 2. Create/update child secrets (regCode, offlineCert, urlCert) with finalizers
+// 3. Create/update ProductRegistration CR with finalizer
+// 4. Handle hash changes (cleanup old resources)
 func (r *EntrypointReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
 
@@ -47,39 +57,68 @@ func (r *EntrypointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	var secret corev1.Secret
 	if err := r.Get(ctx, req.NamespacedName, &secret); err != nil {
 		if apierrors.IsNotFound(err) {
-			// Secret deleted - clean up ProductRegistration CRs
-			log.Info("entrypoint secret deleted, cleaning up")
-			return r.cleanupProductRegistrations(ctx)
+			// Secret deleted - nothing to do
+			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
 	}
 
-	// Ensure salt exists
-	if err := r.ensureSalt(ctx, &secret); err != nil {
-		log.Error(err, "failed to ensure salt on secret")
-		return ctrl.Result{}, err
+	// Handle deletion with finalizer
+	if !secret.DeletionTimestamp.IsZero() {
+		if containsString(secret.Finalizers, consts.FinalizerRegistration) {
+			// Run cleanup - delete all managed resources
+			log.Info("entrypoint secret being deleted, cleaning up managed resources")
+			if err := r.cleanupManagedResources(ctx); err != nil {
+				log.Error(err, "failed to cleanup managed resources")
+				return ctrl.Result{}, err
+			}
+
+			// Remove finalizer
+			secret.Finalizers = removeString(secret.Finalizers, consts.FinalizerRegistration)
+			if err := r.Update(ctx, &secret); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{}, nil
 	}
 
-	// Extract parameters from secret
-	params, err := r.extractParams(&secret)
-	if err != nil {
-		log.Error(err, "failed to extract params from entrypoint secret")
-		return ctrl.Result{}, err
-	}
-
-	// Get existing hashes from secret labels
-	existingNameHash := secret.Labels["scc.suse.com/name-suffix"]
-	existingContentHash := secret.Labels["scc.suse.com/scc-hash"]
-
-	// Handle hash changes - cleanup if needed
-	if existingNameHash != "" && existingNameHash != params.nameHash {
-		log.Info("name hash changed, cleaning up old resources", "old", existingNameHash, "new", params.nameHash)
-		if err := r.cleanupByHash(ctx, existingNameHash); err != nil {
-			log.Error(err, "failed to cleanup resources by name hash")
+	// Add finalizer if not present
+	if !containsString(secret.Finalizers, consts.FinalizerRegistration) {
+		secret.Finalizers = append(secret.Finalizers, consts.FinalizerRegistration)
+		if err := r.Update(ctx, &secret); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
 
+	// Ensure salt exists on entrypoint secret
+	preparedSecret, err := r.ensureSalt(ctx, &secret)
+	if err != nil {
+		log.Error(err, "failed to ensure salt on entrypoint secret")
+		return ctrl.Result{}, err
+	}
+	secret = *preparedSecret
+
+	// Extract parameters from secret (with proper hashing)
+	params, err := r.extractRegistrationParams(&secret)
+	if err != nil {
+		log.Error(err, "failed to extract registration params from entrypoint secret")
+		return ctrl.Result{}, err
+	}
+
+	// Get existing hashes from secret labels
+	existingNameHash := secret.Labels[consts.LabelNameSuffix]
+	existingContentHash := secret.Labels[consts.LabelSccHash]
+
+	// Handle name hash changes - cleanup old ProductRegistration
+	if existingNameHash != "" && existingNameHash != params.nameHash {
+		log.Info("name hash changed, cleaning up old ProductRegistration", "old", existingNameHash, "new", params.nameHash)
+		if err := r.cleanupProductRegistrationByHash(ctx, existingNameHash); err != nil {
+			log.Error(err, "failed to cleanup ProductRegistration by name hash")
+			return ctrl.Result{}, err
+		}
+	}
+
+	// Handle content hash changes - cleanup old child secrets
 	if existingContentHash != "" && existingContentHash != params.contentHash {
 		log.Info("content hash changed, cleaning up old child secrets", "old", existingContentHash, "new", params.contentHash)
 		if err := r.cleanupSecretsByHash(ctx, existingContentHash); err != nil {
@@ -88,29 +127,41 @@ func (r *EntrypointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		}
 	}
 
-	// Update secret labels with new hashes
+	// Update entrypoint secret labels with new hashes
 	if existingNameHash != params.nameHash || existingContentHash != params.contentHash {
 		secretCopy := secret.DeepCopy()
 		if secretCopy.Labels == nil {
 			secretCopy.Labels = make(map[string]string)
 		}
-		secretCopy.Labels["scc.suse.com/name-suffix"] = params.nameHash
-		secretCopy.Labels["scc.suse.com/scc-hash"] = params.contentHash
+		secretCopy.Labels[consts.LabelNameSuffix] = params.nameHash
+		secretCopy.Labels[consts.LabelSccHash] = params.contentHash
 		if err := r.Update(ctx, secretCopy); err != nil {
-			log.Error(err, "failed to update secret labels")
+			log.Error(err, "failed to update entrypoint secret labels")
 			return ctrl.Result{}, err
 		}
+		secret = *secretCopy
 	}
 
-	// Create/update child secrets
-	if err := r.reconcileChildSecrets(ctx, &secret, params); err != nil {
+	// Create/update child secrets with finalizers (following SCC operator pattern)
+	if err := r.reconcileChildSecrets(ctx, params); err != nil {
 		log.Error(err, "failed to reconcile child secrets")
 		return ctrl.Result{}, err
 	}
 
-	// Create/update ProductRegistration CR
+	// Create/update ProductRegistration CR with finalizer
 	if err := r.reconcileProductRegistration(ctx, params); err != nil {
 		log.Error(err, "failed to reconcile ProductRegistration")
+		return ctrl.Result{}, err
+	}
+
+	// Update last-processed annotation on entrypoint secret
+	secretCopy := secret.DeepCopy()
+	if secretCopy.Annotations == nil {
+		secretCopy.Annotations = make(map[string]string)
+	}
+	secretCopy.Annotations[consts.AnnotationLastProcessed] = time.Now().Format(time.RFC3339)
+	if err := r.Update(ctx, secretCopy); err != nil {
+		log.Error(err, "failed to update last-processed annotation")
 		return ctrl.Result{}, err
 	}
 
@@ -118,142 +169,199 @@ func (r *EntrypointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	return ctrl.Result{}, nil
 }
 
-// entrypointParams holds extracted data from the entrypoint secret
-type entrypointParams struct {
-	nameHash         string
-	contentHash      string
-	mode             string
-	registrationCode []byte
-	sccURL           string
-	sccURLCert       []byte
-	offlineCert      []byte
-	namespace        string
-	ownerRef         metav1.OwnerReference
+// registrationParams holds extracted data from the entrypoint secret.
+// Based on SCC Operator's RegistrationParams.
+type registrationParams struct {
+	managedByName        string
+	nameHash             string
+	contentHash          string
+	mode                 connectngv1.RegistrationMode
+	regCode              []byte
+	regCodeSecretRef     *corev1.SecretReference
+	regURL               string
+	regURLCertSet        bool
+	hasRegURLCertData    bool
+	regURLCertData       *[]byte
+	regURLCertSecretRef  *corev1.SecretReference
+	hasOfflineCertData   bool
+	offlineCertData      *[]byte
+	offlineCertSecretRef *corev1.SecretReference
 }
 
-// extractParams extracts registration parameters from the entrypoint secret
-func (r *EntrypointReconciler) extractParams(secret *corev1.Secret) (*entrypointParams, error) {
+// Labels produces the labels to apply to related resources.
+// Matches SCC Operator's RegistrationParams.Labels() pattern.
+func (p registrationParams) Labels() map[string]string {
+	return map[string]string{
+		consts.LabelNameSuffix:   p.nameHash,
+		consts.LabelSccHash:      p.contentHash,
+		consts.LabelSccManagedBy: p.managedByName + "_" + consts.ManagedByValueSecretBroker,
+		consts.LabelK8sManagedBy: p.managedByName,
+	}
+}
+
+// ensureSalt ensures the entrypoint secret has a salt label for hash generation.
+// Uses proper random salt generation from salt package (matches SCC operator).
+func (r *EntrypointReconciler) ensureSalt(ctx context.Context, secret *corev1.Secret) (*corev1.Secret, error) {
+	log := log.FromContext(ctx)
+
+	if secret.Labels == nil {
+		secret.Labels = make(map[string]string)
+	}
+
+	// If salt already exists, return
+	if _, hasSalt := secret.Labels[consts.LabelObjectSalt]; hasSalt {
+		return secret, nil
+	}
+
+	log.Info("generating salt for entrypoint secret", "secret", secret.Name)
+
+	// Generate random 8-character salt (matches SCC operator)
+	preparedSecret := secret.DeepCopy()
+	generatedSalt := salt.NewSaltGen(nil, nil).GenerateSalt()
+
+	existingLabels := make(map[string]string)
+	if objLabels := secret.GetLabels(); objLabels != nil {
+		existingLabels = objLabels
+	}
+	existingLabels[consts.LabelObjectSalt] = generatedSalt
+	preparedSecret.SetLabels(existingLabels)
+
+	if err := r.Update(ctx, preparedSecret); err != nil {
+		log.Error(err, "failed to apply salt to entrypoint secret")
+		return nil, err
+	}
+
+	log.Info("added salt to entrypoint secret", "secret", secret.Name, "salt", generatedSalt)
+	return preparedSecret, nil
+}
+
+// extractRegistrationParams extracts registration parameters from the entrypoint secret.
+// Based on SCC Operator's extractRegistrationParamsFromSecret.
+func (r *EntrypointReconciler) extractRegistrationParams(secret *corev1.Secret) (*registrationParams, error) {
+	log := log.FromContext(context.Background())
+
+	salt := secret.Labels[consts.LabelObjectSalt]
+	if salt == "" {
+		return nil, fmt.Errorf("entrypoint secret missing salt label")
+	}
+
 	// Get registration mode (default to online)
-	mode := "online"
-	if modeBytes, ok := secret.Data["registrationType"]; ok && len(modeBytes) > 0 {
-		mode = string(modeBytes)
-		if mode != "online" && mode != "offline" {
-			return nil, fmt.Errorf("invalid registrationType: %s (must be 'online' or 'offline')", mode)
+	regMode := connectngv1.RegistrationModeOnline
+	regType, ok := secret.Data[consts.SecretKeyRegistrationType]
+	if !ok || len(regType) == 0 {
+		log.V(1).Info("secret missing registrationType field, defaulting to online")
+	} else {
+		regMode = connectngv1.RegistrationMode(regType)
+		if regMode != connectngv1.RegistrationModeOnline && regMode != connectngv1.RegistrationModeOffline {
+			return nil, fmt.Errorf("invalid registration mode %s", string(regMode))
 		}
 	}
 
 	// Get registration code (required for online mode)
-	regCode, hasRegCode := secret.Data["registrationCode"]
-	if mode == "online" && (!hasRegCode || len(regCode) == 0) {
-		return nil, fmt.Errorf("registrationCode is required for online mode")
+	regCode, ok := secret.Data[consts.SecretKeyRegistrationCode]
+	if !ok || len(regCode) == 0 {
+		if regMode == connectngv1.RegistrationModeOnline {
+			return nil, fmt.Errorf("secret does not have data %s; this is required in online mode", consts.SecretKeyRegistrationCode)
+		}
 	}
 
-	// Get optional fields
-	sccURL := string(secret.Data["registrationURL"])
-	sccURLCert := secret.Data["registrationURLCert"]
-	offlineCert := secret.Data["offlineCertificate"]
+	// Get offline certificate data
+	offlineRegCertData, certOk := secret.Data[consts.SecretKeyOfflineCertificate]
+	hasOfflineCert := certOk && len(offlineRegCertData) > 0
 
-	// Get salt (or generate if missing)
-	salt := secret.Labels["scc.suse.com/object-salt"]
-	if salt == "" {
-		// TODO: Generate and apply salt label
-		salt = "default-salt"
+	// Get registration URL and cert for online mode
+	hasRegCertField := false
+	var regURLBytes, regCertBytes []byte
+	regURLString := ""
+	if regMode == connectngv1.RegistrationModeOnline {
+		// Get registration URL from secret or env var
+		regURLBytes, _ = secret.Data[consts.SecretKeyRegistrationURL]
+		regURLString = string(regURLBytes)
+		// Get registration URL cert
+		regCertBytes, hasRegCertField = secret.Data[consts.SecretKeyRegistrationURLCert]
 	}
 
-	// Compute hashes
+	// Compute hashes (matches SCC operator logic)
 	hasher := md5.New()
 
-	// Name hash: salt + mode + regCode + sccURL
+	// Name hash: salt + regType + regCode + regURL
 	nameData := []byte(salt)
-	nameData = append(nameData, []byte(mode)...)
+	nameData = append(nameData, regType...)
 	nameData = append(nameData, regCode...)
-	nameData = append(nameData, []byte(sccURL)...)
-	hasher.Write(nameData)
+	nameData = append(nameData, regURLBytes...)
+
+	if _, err := hasher.Write(nameData); err != nil {
+		return nil, fmt.Errorf("failed to hash name data: %v", err)
+	}
 	nameHash := hex.EncodeToString(hasher.Sum(nil))
 
-	// Content hash: nameData + offlineCert
+	// Content hash: nameData + offlineCertData
 	hasher.Reset()
-	contentData := append(nameData, offlineCert...)
-	hasher.Write(contentData)
+	contentData := append(nameData, offlineRegCertData...)
+	if _, err := hasher.Write(contentData); err != nil {
+		return nil, fmt.Errorf("failed to hash content data: %v", err)
+	}
 	contentHash := hex.EncodeToString(hasher.Sum(nil))
 
-	// Create owner reference
-	ownerRef := metav1.OwnerReference{
-		APIVersion: "v1",
-		Kind:       "Secret",
-		Name:       secret.Name,
-		UID:        secret.UID,
-	}
+	log.V(1).Info("extracted registration params", "nameHash", nameHash, "contentHash", contentHash, "mode", regMode)
 
-	return &entrypointParams{
-		nameHash:         nameHash,
-		contentHash:      contentHash,
-		mode:             mode,
-		registrationCode: regCode,
-		sccURL:           sccURL,
-		sccURLCert:       sccURLCert,
-		offlineCert:      offlineCert,
-		namespace:        secret.Namespace,
-		ownerRef:         ownerRef,
+	return &registrationParams{
+		managedByName: r.ProductName,
+		nameHash:      nameHash,
+		contentHash:   contentHash,
+		mode:          regMode,
+		regCode:       regCode,
+		regCodeSecretRef: &corev1.SecretReference{
+			Name:      consts.RegistrationCodeSecretName(nameHash),
+			Namespace: secret.Namespace,
+		},
+		hasOfflineCertData: hasOfflineCert,
+		offlineCertData:    &offlineRegCertData,
+		offlineCertSecretRef: &corev1.SecretReference{
+			Name:      consts.OfflineCertificateSecretName(nameHash),
+			Namespace: secret.Namespace,
+		},
+		regURL:            regURLString,
+		regURLCertSet:     hasRegCertField,
+		hasRegURLCertData: hasRegCertField && len(regCertBytes) > 0,
+		regURLCertData:    &regCertBytes,
+		regURLCertSecretRef: &corev1.SecretReference{
+			Name:      consts.RegistrationURLCertificateSecretName(nameHash),
+			Namespace: secret.Namespace,
+		},
 	}, nil
 }
 
-// reconcileChildSecrets creates/updates child secrets based on the entrypoint secret
-func (r *EntrypointReconciler) reconcileChildSecrets(ctx context.Context, entrypoint *corev1.Secret, params *entrypointParams) error {
-	labels := map[string]string{
-		"scc.suse.com/name-suffix":     params.nameHash,
-		"scc.suse.com/scc-hash":        params.contentHash,
-		"app.kubernetes.io/managed-by": r.ProductName + "-registration",
-	}
-
-	// Create registration code secret (online mode)
-	if params.mode == "online" && len(params.registrationCode) > 0 {
-		regCodeSecret := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:            fmt.Sprintf("registration-code-%s", params.nameHash),
-				Namespace:       params.namespace,
-				Labels:          labels,
-				OwnerReferences: []metav1.OwnerReference{params.ownerRef},
-			},
-			Data: map[string][]byte{
-				"registrationCode": params.registrationCode,
-			},
+// reconcileChildSecrets creates/updates child secrets with proper labels and finalizers.
+// Follows SCC Operator's pattern: regCodeFromSecretEntrypoint, offlineCertFromSecretEntrypoint, etc.
+func (r *EntrypointReconciler) reconcileChildSecrets(ctx context.Context, params *registrationParams) error {
+	// Create/update registration code secret (online mode)
+	if params.mode == connectngv1.RegistrationModeOnline && len(params.regCode) > 0 {
+		regCodeSecret, err := r.regCodeSecretFromParams(ctx, params)
+		if err != nil {
+			return fmt.Errorf("failed to prepare registration code secret: %w", err)
 		}
 		if err := r.createOrUpdateSecret(ctx, regCodeSecret); err != nil {
 			return fmt.Errorf("failed to create/update registration code secret: %w", err)
 		}
 	}
 
-	// Create SCC URL cert secret (if provided)
-	if len(params.sccURLCert) > 0 {
-		urlCertSecret := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:            fmt.Sprintf("registration-url-cert-%s", params.nameHash),
-				Namespace:       params.namespace,
-				Labels:          labels,
-				OwnerReferences: []metav1.OwnerReference{params.ownerRef},
-			},
-			Data: map[string][]byte{
-				"registrationURLCert": params.sccURLCert,
-			},
+	// Create/update registration URL cert secret (if provided)
+	if params.hasRegURLCertData {
+		regURLCertSecret, err := r.regURLCertSecretFromParams(ctx, params)
+		if err != nil {
+			return fmt.Errorf("failed to prepare registration URL cert secret: %w", err)
 		}
-		if err := r.createOrUpdateSecret(ctx, urlCertSecret); err != nil {
-			return fmt.Errorf("failed to create/update URL cert secret: %w", err)
+		if err := r.createOrUpdateSecret(ctx, regURLCertSecret); err != nil {
+			return fmt.Errorf("failed to create/update registration URL cert secret: %w", err)
 		}
 	}
 
-	// Create offline certificate secret (offline mode)
-	if params.mode == "offline" && len(params.offlineCert) > 0 {
-		offlineCertSecret := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:            fmt.Sprintf("offline-certificate-%s", params.nameHash),
-				Namespace:       params.namespace,
-				Labels:          labels,
-				OwnerReferences: []metav1.OwnerReference{params.ownerRef},
-			},
-			Data: map[string][]byte{
-				"certificate": params.offlineCert,
-			},
+	// Create/update offline certificate secret (offline mode)
+	if params.hasOfflineCertData {
+		offlineCertSecret, err := r.offlineCertSecretFromParams(ctx, params)
+		if err != nil {
+			return fmt.Errorf("failed to prepare offline cert secret: %w", err)
 		}
 		if err := r.createOrUpdateSecret(ctx, offlineCertSecret); err != nil {
 			return fmt.Errorf("failed to create/update offline cert secret: %w", err)
@@ -263,43 +371,157 @@ func (r *EntrypointReconciler) reconcileChildSecrets(ctx context.Context, entryp
 	return nil
 }
 
-// reconcileProductRegistration creates/updates the ProductRegistration CR
-func (r *EntrypointReconciler) reconcileProductRegistration(ctx context.Context, params *entrypointParams) error {
-	// Create spec
+// regCodeSecretFromParams creates the registration code secret with proper labels and finalizer.
+// Based on SCC Operator's regCodeFromSecretEntrypoint.
+func (r *EntrypointReconciler) regCodeSecretFromParams(ctx context.Context, params *registrationParams) (*corev1.Secret, error) {
+	secretName := params.regCodeSecretRef.Name
+
+	// Try to get existing secret
+	regCodeSecret := &corev1.Secret{}
+	err := r.Get(ctx, client.ObjectKey{Name: secretName, Namespace: params.regCodeSecretRef.Namespace}, regCodeSecret)
+	if err != nil {
+		if !apierrors.IsNotFound(err) {
+			return nil, err
+		}
+
+		// Create new secret
+		regCodeSecret = &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: params.regCodeSecretRef.Namespace,
+				Name:      secretName,
+			},
+			Data: map[string][]byte{
+				consts.SecretKeyRegistrationCode: params.regCode,
+			},
+		}
+	}
+
+	// Apply labels (use maps.Copy pattern from SCC operator)
+	if regCodeSecret.Labels == nil {
+		regCodeSecret.Labels = map[string]string{}
+	}
+	defaultLabels := params.Labels()
+	defaultLabels[consts.LabelSecretRole] = string(consts.SecretRoleRegistrationCode)
+	maps.Copy(regCodeSecret.Labels, defaultLabels)
+
+	// Add finalizer
+	if !containsString(regCodeSecret.Finalizers, consts.FinalizerRegistrationCode) {
+		regCodeSecret.Finalizers = append(regCodeSecret.Finalizers, consts.FinalizerRegistrationCode)
+	}
+
+	return regCodeSecret, nil
+}
+
+// regURLCertSecretFromParams creates the registration URL cert secret with proper labels and finalizer.
+// Based on SCC Operator's regURLCertFromSecretEntrypoint.
+func (r *EntrypointReconciler) regURLCertSecretFromParams(ctx context.Context, params *registrationParams) (*corev1.Secret, error) {
+	secretName := params.regURLCertSecretRef.Name
+
+	// Try to get existing secret
+	regURLCertSecret := &corev1.Secret{}
+	err := r.Get(ctx, client.ObjectKey{Name: secretName, Namespace: params.regURLCertSecretRef.Namespace}, regURLCertSecret)
+	if err != nil {
+		if !apierrors.IsNotFound(err) {
+			return nil, err
+		}
+
+		// Create new secret
+		regURLCertSecret = &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: params.regURLCertSecretRef.Namespace,
+				Name:      secretName,
+			},
+			Data: map[string][]byte{
+				consts.SecretKeyRegistrationURLCert: *params.regURLCertData,
+			},
+		}
+	}
+
+	// Apply labels (use maps.Copy pattern from SCC operator)
+	if regURLCertSecret.Labels == nil {
+		regURLCertSecret.Labels = map[string]string{}
+	}
+	defaultLabels := params.Labels()
+	defaultLabels[consts.LabelSecretRole] = string(consts.SecretRoleRegistrationURLCert)
+	maps.Copy(regURLCertSecret.Labels, defaultLabels)
+
+	// Add finalizer
+	if !containsString(regURLCertSecret.Finalizers, consts.FinalizerRegistrationURLCert) {
+		regURLCertSecret.Finalizers = append(regURLCertSecret.Finalizers, consts.FinalizerRegistrationURLCert)
+	}
+
+	return regURLCertSecret, nil
+}
+
+// offlineCertSecretFromParams creates the offline certificate secret with proper labels and finalizer.
+// Based on SCC Operator's offlineCertFromSecretEntrypoint.
+func (r *EntrypointReconciler) offlineCertSecretFromParams(ctx context.Context, params *registrationParams) (*corev1.Secret, error) {
+	secretName := params.offlineCertSecretRef.Name
+
+	// Try to get existing secret
+	offlineCertSecret := &corev1.Secret{}
+	err := r.Get(ctx, client.ObjectKey{Name: secretName, Namespace: params.offlineCertSecretRef.Namespace}, offlineCertSecret)
+	if err != nil {
+		if !apierrors.IsNotFound(err) {
+			return nil, err
+		}
+
+		// Create new secret
+		offlineCertSecret = &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: params.offlineCertSecretRef.Namespace,
+				Name:      secretName,
+			},
+			Data: map[string][]byte{
+				consts.SecretKeyOfflineCertificate: *params.offlineCertData,
+			},
+		}
+	}
+
+	// Apply labels (use maps.Copy pattern from SCC operator)
+	if offlineCertSecret.Labels == nil {
+		offlineCertSecret.Labels = map[string]string{}
+	}
+	defaultLabels := params.Labels()
+	defaultLabels[consts.LabelSecretRole] = string(consts.SecretRoleOfflineCert)
+	maps.Copy(offlineCertSecret.Labels, defaultLabels)
+
+	// Add finalizer
+	if !containsString(offlineCertSecret.Finalizers, consts.FinalizerOfflineCertificate) {
+		offlineCertSecret.Finalizers = append(offlineCertSecret.Finalizers, consts.FinalizerOfflineCertificate)
+	}
+
+	return offlineCertSecret, nil
+}
+
+// reconcileProductRegistration creates/updates the ProductRegistration CR with finalizer.
+// Based on SCC Operator's registrationFromSecretEntrypoint.
+func (r *EntrypointReconciler) reconcileProductRegistration(ctx context.Context, params *registrationParams) error {
+	// Build spec from params
 	spec := connectngv1.ProductRegistrationSpec{
-		Mode: connectngv1.RegistrationMode(params.mode),
+		Mode: params.mode,
 	}
 
 	// Set registration request for online mode
-	if params.mode == "online" {
+	if params.mode == connectngv1.RegistrationModeOnline {
 		spec.RegistrationRequest = &connectngv1.RegistrationRequest{
-			RegistrationCodeSecretRef: &corev1.SecretReference{
-				Name:      fmt.Sprintf("registration-code-%s", params.nameHash),
-				Namespace: params.namespace,
-			},
+			RegistrationCodeSecretRef: params.regCodeSecretRef,
 		}
-		if params.sccURL != "" {
-			spec.RegistrationRequest.RegistrationAPIUrl = &params.sccURL
+		if params.regURL != "" {
+			spec.RegistrationRequest.RegistrationAPIUrl = &params.regURL
 		}
-		if len(params.sccURLCert) > 0 {
-			spec.RegistrationRequest.RegistrationAPICertificateSecretRef = &corev1.SecretReference{
-				Name:      fmt.Sprintf("registration-url-cert-%s", params.nameHash),
-				Namespace: params.namespace,
-			}
+		if params.hasRegURLCertData {
+			spec.RegistrationRequest.RegistrationAPICertificateSecretRef = params.regURLCertSecretRef
 		}
 	}
 
 	// Set offline certificate for offline mode
-	if params.mode == "offline" && len(params.offlineCert) > 0 {
-		spec.OfflineRegistrationCertificateSecretRef = &corev1.SecretReference{
-			Name:      fmt.Sprintf("offline-certificate-%s", params.nameHash),
-			Namespace: params.namespace,
-		}
+	if params.mode == connectngv1.RegistrationModeOffline && params.hasOfflineCertData {
+		spec.OfflineRegistrationCertificateSecretRef = params.offlineCertSecretRef
 	}
 
-	// Create ProductRegistration using unstructured adapter
-	// We use the unstructured adapter because we don't import the product's typed CRD
-	prName := fmt.Sprintf("%s-scc-registration-%s", r.ProductName, params.nameHash)
+	// Create ProductRegistration name (matches SCC operator)
+	prName := consts.RegistrationName(params.nameHash)
 
 	adapter := NewUnstructuredAdapter(
 		r.ProductGroup,
@@ -314,16 +536,17 @@ func (r *EntrypointReconciler) reconcileProductRegistration(ctx context.Context,
 		// Create new ProductRegistration
 		pr := adapter.New()
 		pr.SetName(prName)
-		pr.SetLabels(map[string]string{
-			"scc.suse.com/name-suffix":     params.nameHash,
-			"scc.suse.com/scc-hash":        params.contentHash,
-			"app.kubernetes.io/managed-by": r.ProductName + "-registration",
-		})
-		pr.SetOwnerReferences([]metav1.OwnerReference{params.ownerRef})
+
+		// Apply labels
+		labels := params.Labels()
+		pr.SetLabels(labels)
 
 		if err := adapter.SetSpec(pr, &spec); err != nil {
 			return fmt.Errorf("failed to set spec: %w", err)
 		}
+
+		// Add finalizer
+		pr.SetFinalizers(append(pr.GetFinalizers(), consts.FinalizerRegistration))
 
 		if err := r.Create(ctx, pr); err != nil {
 			return fmt.Errorf("failed to create ProductRegistration: %w", err)
@@ -332,14 +555,16 @@ func (r *EntrypointReconciler) reconcileProductRegistration(ctx context.Context,
 		return fmt.Errorf("failed to get ProductRegistration: %w", err)
 	} else {
 		// Update existing
-		existingPR.SetLabels(map[string]string{
-			"scc.suse.com/name-suffix":     params.nameHash,
-			"scc.suse.com/scc-hash":        params.contentHash,
-			"app.kubernetes.io/managed-by": r.ProductName + "-registration",
-		})
+		labels := params.Labels()
+		existingPR.SetLabels(labels)
 
 		if err := adapter.SetSpec(existingPR, &spec); err != nil {
 			return fmt.Errorf("failed to set spec: %w", err)
+		}
+
+		// Ensure finalizer exists
+		if !containsString(existingPR.GetFinalizers(), consts.FinalizerRegistration) {
+			existingPR.SetFinalizers(append(existingPR.GetFinalizers(), consts.FinalizerRegistration))
 		}
 
 		if err := r.Update(ctx, existingPR); err != nil {
@@ -350,7 +575,7 @@ func (r *EntrypointReconciler) reconcileProductRegistration(ctx context.Context,
 	return nil
 }
 
-// createOrUpdateSecret creates or updates a secret
+// createOrUpdateSecret creates or updates a secret.
 func (r *EntrypointReconciler) createOrUpdateSecret(ctx context.Context, secret *corev1.Secret) error {
 	existing := &corev1.Secret{}
 	err := r.Get(ctx, client.ObjectKey{Name: secret.Name, Namespace: secret.Namespace}, existing)
@@ -364,35 +589,13 @@ func (r *EntrypointReconciler) createOrUpdateSecret(ctx context.Context, secret 
 	// Update existing
 	existing.Data = secret.Data
 	existing.Labels = secret.Labels
+	existing.Finalizers = secret.Finalizers
 	return r.Update(ctx, existing)
 }
 
-// ensureSalt ensures the entrypoint secret has a salt label for hash generation
-func (r *EntrypointReconciler) ensureSalt(ctx context.Context, secret *corev1.Secret) error {
-	if secret.Labels == nil {
-		secret.Labels = make(map[string]string)
-	}
-
-	if _, hasSalt := secret.Labels["scc.suse.com/object-salt"]; hasSalt {
-		return nil
-	}
-
-	// Generate random salt (8 bytes hex-encoded)
-	hasher := md5.New()
-	hasher.Write([]byte(secret.Name))
-	hasher.Write([]byte(secret.Namespace))
-	hasher.Write([]byte(secret.UID))
-	salt := hex.EncodeToString(hasher.Sum(nil))[:16]
-
-	secretCopy := secret.DeepCopy()
-	secretCopy.Labels["scc.suse.com/object-salt"] = salt
-	return r.Update(ctx, secretCopy)
-}
-
-// cleanupByHash removes ProductRegistration CR with the given name hash
-func (r *EntrypointReconciler) cleanupByHash(ctx context.Context, nameHash string) error {
-	// Delete the ProductRegistration with this name hash
-	prName := fmt.Sprintf("%s-scc-registration-%s", r.ProductName, nameHash)
+// cleanupProductRegistrationByHash removes ProductRegistration CR with the given name hash.
+func (r *EntrypointReconciler) cleanupProductRegistrationByHash(ctx context.Context, nameHash string) error {
+	prName := consts.RegistrationName(nameHash)
 
 	adapter := NewUnstructuredAdapter(
 		r.ProductGroup,
@@ -411,14 +614,16 @@ func (r *EntrypointReconciler) cleanupByHash(ctx context.Context, nameHash strin
 	return nil
 }
 
-// cleanupSecretsByHash removes child secrets with the given content hash
+// cleanupSecretsByHash removes child secrets with the given content hash.
 func (r *EntrypointReconciler) cleanupSecretsByHash(ctx context.Context, contentHash string) error {
+	log := log.FromContext(ctx)
+
 	// List all secrets with this content hash
 	secretList := &corev1.SecretList{}
 	listOpts := []client.ListOption{
 		client.InNamespace(r.EntrypointNamespace),
 		client.MatchingLabels{
-			"scc.suse.com/scc-hash": contentHash,
+			consts.LabelSccHash: contentHash,
 		},
 	}
 
@@ -435,13 +640,16 @@ func (r *EntrypointReconciler) cleanupSecretsByHash(ctx context.Context, content
 		if err := r.Delete(ctx, &secret); err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("failed to delete secret %s: %w", secret.Name, err)
 		}
+		log.Info("deleted child secret due to content hash change", "name", secret.Name)
 	}
 
 	return nil
 }
 
-// cleanupProductRegistrations removes all ProductRegistration CRs managed by this entrypoint
-func (r *EntrypointReconciler) cleanupProductRegistrations(ctx context.Context) (ctrl.Result, error) {
+// cleanupManagedResources removes all ProductRegistration CRs and child secrets managed by this entrypoint.
+func (r *EntrypointReconciler) cleanupManagedResources(ctx context.Context) error {
+	log := log.FromContext(ctx)
+
 	adapter := NewUnstructuredAdapter(
 		r.ProductGroup,
 		"v1",
@@ -450,23 +658,69 @@ func (r *EntrypointReconciler) cleanupProductRegistrations(ctx context.Context) 
 
 	// List all ProductRegistrations managed by this entrypoint
 	prList, err := adapter.List(ctx, r.Client, client.MatchingLabels{
-		"app.kubernetes.io/managed-by": r.ProductName + "-registration",
+		consts.LabelK8sManagedBy: r.ProductName,
 	})
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to list ProductRegistrations: %w", err)
+		return fmt.Errorf("failed to list ProductRegistrations: %w", err)
 	}
 
 	// Delete all managed ProductRegistrations
 	for _, pr := range prList {
 		if err := r.Delete(ctx, pr); err != nil && !apierrors.IsNotFound(err) {
-			return ctrl.Result{}, fmt.Errorf("failed to delete ProductRegistration %s: %w", pr.GetName(), err)
+			return fmt.Errorf("failed to delete ProductRegistration %s: %w", pr.GetName(), err)
 		}
+		log.Info("deleted ProductRegistration during cleanup", "name", pr.GetName())
 	}
 
-	return ctrl.Result{}, nil
+	// List all child secrets managed by this entrypoint
+	secretList := &corev1.SecretList{}
+	listOpts := []client.ListOption{
+		client.InNamespace(r.EntrypointNamespace),
+		client.MatchingLabels{
+			consts.LabelK8sManagedBy: r.ProductName,
+		},
+	}
+
+	if err := r.List(ctx, secretList, listOpts...); err != nil {
+		return fmt.Errorf("failed to list managed secrets: %w", err)
+	}
+
+	// Delete all child secrets (but not the entrypoint itself)
+	for _, secret := range secretList.Items {
+		if secret.Name == r.EntrypointSecretName {
+			continue // Don't delete the entrypoint secret itself
+		}
+
+		if err := r.Delete(ctx, &secret); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("failed to delete secret %s: %w", secret.Name, err)
+		}
+		log.Info("deleted child secret during cleanup", "name", secret.Name)
+	}
+
+	return nil
 }
 
-// SetupWithManager sets up the controller with the Manager
+// Helper functions for finalizer management (reused from reconciler.go)
+func containsString(slice []string, s string) bool {
+	for _, item := range slice {
+		if item == s {
+			return true
+		}
+	}
+	return false
+}
+
+func removeString(slice []string, s string) []string {
+	result := []string{}
+	for _, item := range slice {
+		if item != s {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+// SetupWithManager sets up the controller with the Manager.
 func (r *EntrypointReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Secret{}).

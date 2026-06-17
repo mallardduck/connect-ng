@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/SUSE/connect-ng/k8s/consts"
 	"github.com/SUSE/connect-ng/pkg/connection"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -88,13 +89,13 @@ func (c *SecretBackedCredentials) loadFromSecret() error {
 	}
 
 	// Update in-memory cache
-	if login, ok := secret.Data["systemLogin"]; ok {
+	if login, ok := secret.Data[consts.SecretKeySystemLogin]; ok {
 		c.systemLogin = string(login)
 	}
-	if password, ok := secret.Data["password"]; ok {
+	if password, ok := secret.Data[consts.SecretKeyPassword]; ok {
 		c.password = string(password)
 	}
-	if token, ok := secret.Data["systemToken"]; ok {
+	if token, ok := secret.Data[consts.SecretKeySystemToken]; ok {
 		c.systemToken = string(token)
 	}
 
@@ -117,7 +118,7 @@ func (c *SecretBackedCredentials) saveToSecret() error {
 				Name:      c.secretName,
 				Namespace: c.secretNamespace,
 				Labels: map[string]string{
-					"suse.com/credentials": "scc-system",
+					consts.LabelSecretRole: string(consts.SecretRoleSCCCredentials),
 				},
 			},
 			Data: make(map[string][]byte),
@@ -132,9 +133,9 @@ func (c *SecretBackedCredentials) saveToSecret() error {
 	}
 
 	// Update secret data from in-memory cache
-	secret.Data["systemLogin"] = []byte(c.systemLogin)
-	secret.Data["password"] = []byte(c.password)
-	secret.Data["systemToken"] = []byte(c.systemToken)
+	secret.Data[consts.SecretKeySystemLogin] = []byte(c.systemLogin)
+	secret.Data[consts.SecretKeyPassword] = []byte(c.password)
+	secret.Data[consts.SecretKeySystemToken] = []byte(c.systemToken)
 
 	// Create or update
 	if create {

@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/SUSE/connect-ng/k8s/consts"
 	"github.com/SUSE/connect-ng/k8s/scclient"
 	"github.com/SUSE/connect-ng/k8s/types"
 	corev1 "k8s.io/api/core/v1"
@@ -169,7 +170,7 @@ func (h *OnlineHandler) Register(ctx context.Context, obj types.ProductRegistrat
 		return 0, fmt.Errorf("registration code secret reference is required for online mode")
 	}
 
-	regCode, err := h.fetchSecretData(ctx, regCodeRef, "registrationCode")
+	regCode, err := h.fetchSecretData(ctx, regCodeRef, consts.SecretKeyRegistrationCode)
 	if err != nil {
 		return 0, fmt.Errorf("failed to fetch registration code: %w", err)
 	}
@@ -239,7 +240,7 @@ func (h *OnlineHandler) Activate(ctx context.Context, obj types.ProductRegistrat
 		return fmt.Errorf("registration code secret reference required for activation")
 	}
 
-	regCode, err := h.fetchSecretData(ctx, regCodeRef, "registrationCode")
+	regCode, err := h.fetchSecretData(ctx, regCodeRef, consts.SecretKeyRegistrationCode)
 	if err != nil {
 		return fmt.Errorf("failed to fetch registration code: %w", err)
 	}
@@ -252,7 +253,7 @@ func (h *OnlineHandler) Activate(ctx context.Context, obj types.ProductRegistrat
 
 	// Extract architecture from metrics (or use "unknown" if not present)
 	arch := "unknown"
-	if archValue, ok := metricsData["arch"]; ok {
+	if archValue, ok := metricsData[consts.MetricsKeyArch]; ok {
 		if archStr, ok := archValue.(string); ok {
 			arch = archStr
 		}
@@ -407,6 +408,46 @@ func (h *OnlineHandler) ReconcileKeepaliveError(ctx context.Context, obj types.P
 	return obj
 }
 
+// Preprocessing Methods
+
+// NeedsPreprocessRegistration checks if the registration needs preprocessing.
+// For online mode, preprocessing is not currently needed.
+// Based on SCC Operator's online handler (always returns false).
+func (h *OnlineHandler) NeedsPreprocessRegistration(ctx context.Context, obj types.ProductRegistrationObject) bool {
+	// TODO: online implementation of NeedsPreprocessRegistration if needed
+	return false
+}
+
+// PreprocessRegistration performs preprocessing on the registration.
+// For online mode, this is currently a no-op.
+// Based on SCC Operator's online handler.
+func (h *OnlineHandler) PreprocessRegistration(ctx context.Context, obj types.ProductRegistrationObject) (types.ProductRegistrationObject, error) {
+	// TODO: online implementation of PreprocessRegistration if needed
+	return obj, nil
+}
+
+// ResetToReadyForActivation resets the registration state to allow re-activation.
+// Used when syncNow is triggered on a failed activation.
+// Based on SCC Operator's online handler.
+func (h *OnlineHandler) ResetToReadyForActivation(ctx context.Context, obj types.ProductRegistrationObject) (types.ProductRegistrationObject, error) {
+	status := obj.GetStatus()
+
+	// Clear activation status
+	status.SetActivated(false)
+	now := metav1.Now()
+	status.SetLastValidatedTS(&now) // Set to zero time
+
+	// Set conditions
+	status.SetCondition("Progressing", metav1.ConditionTrue, "Resetting", "Resetting registration for re-activation")
+	status.SetCondition("Ready", metav1.ConditionFalse, "NotReady", "Registration reset")
+	status.SetCondition("Activated", metav1.ConditionFalse, "NotActivated", "Activation cleared")
+
+	// Clear failure condition if present
+	status.RemoveCondition("Failure")
+
+	return obj, nil
+}
+
 // Helper Methods
 
 // createCredentialsSecret creates an empty credentials secret.
@@ -418,14 +459,14 @@ func (h *OnlineHandler) createCredentialsSecret(ctx context.Context, obj types.P
 		namespace = "default" // TODO: Make configurable
 	}
 
-	secretName := fmt.Sprintf("%s-scc-credentials", obj.GetName())
+	secretName := consts.SCCCredentialsSecretName(obj.GetName())
 
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      secretName,
 			Namespace: namespace,
 			Labels: map[string]string{
-				"suse.com/credentials": "scc-system",
+				consts.LabelSecretRole: string(consts.SecretRoleSCCCredentials),
 			},
 		},
 		Type: corev1.SecretTypeOpaque,
@@ -470,12 +511,12 @@ func (h *OnlineHandler) fetchSecretData(ctx context.Context, ref *corev1.SecretR
 
 // fetchCredentials fetches login and password from credentials secret.
 func (h *OnlineHandler) fetchCredentials(ctx context.Context, ref *corev1.SecretReference) (login, password string, err error) {
-	login, err = h.fetchSecretData(ctx, ref, "login")
+	login, err = h.fetchSecretData(ctx, ref, consts.SecretKeyLogin)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to fetch login: %w", err)
 	}
 
-	password, err = h.fetchSecretData(ctx, ref, "password")
+	password, err = h.fetchSecretData(ctx, ref, consts.SecretKeyPassword)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to fetch password: %w", err)
 	}
@@ -499,8 +540,8 @@ func (h *OnlineHandler) updateCredentialsSecret(ctx context.Context, ref *corev1
 	if secret.Data == nil {
 		secret.Data = make(map[string][]byte)
 	}
-	secret.Data["login"] = []byte(login)
-	secret.Data["password"] = []byte(password)
+	secret.Data[consts.SecretKeyLogin] = []byte(login)
+	secret.Data[consts.SecretKeyPassword] = []byte(password)
 
 	if err := h.config.SecretClient.Update(ctx, secret); err != nil {
 		return fmt.Errorf("failed to update credentials secret: %w", err)
@@ -559,10 +600,10 @@ func (h *OnlineHandler) fetchMetrics(ctx context.Context) (map[string]any, error
 	}
 
 	// Extract the payload
-	payloadBytes, ok := secret.Data["payload"]
+	payloadBytes, ok := secret.Data[consts.SecretKeyPayload]
 	if !ok {
-		return nil, fmt.Errorf("metrics secret %s/%s missing 'payload' key",
-			h.config.MetricsSecretNamespace, h.config.MetricsSecretName)
+		return nil, fmt.Errorf("metrics secret %s/%s missing %q key",
+			h.config.MetricsSecretNamespace, h.config.MetricsSecretName, consts.SecretKeyPayload)
 	}
 
 	// Parse JSON payload
@@ -580,7 +621,7 @@ func (h *OnlineHandler) fetchMetrics(ctx context.Context) (map[string]any, error
 // If not present in metrics, we fall back to the container's hostname as a last resort.
 func (h *OnlineHandler) extractHostname(metricsData map[string]any) (string, error) {
 	// Try to extract from metrics first
-	if hostnameValue, ok := metricsData["hostname"]; ok {
+	if hostnameValue, ok := metricsData[consts.MetricsKeyHostname]; ok {
 		if hostname, ok := hostnameValue.(string); ok && hostname != "" {
 			return hostname, nil
 		}
@@ -609,12 +650,12 @@ func (h *OnlineHandler) determineSCCURL(spec types.ProductRegistrationSpec) stri
 	}
 
 	// 2. Check PRIME_SCC_REGISTRATION_HOST_URL env var (global override)
-	if primeURL := os.Getenv("PRIME_SCC_REGISTRATION_HOST_URL"); primeURL != "" {
+	if primeURL := os.Getenv(consts.EnvPrimeSCCRegistrationHostURL); primeURL != "" {
 		return primeURL
 	}
 
 	// 3. Check DEV_MODE for staging SCC
-	if devMode := os.Getenv("DEV_MODE"); devMode == "true" || devMode == "1" {
+	if devMode := os.Getenv(consts.EnvDevMode); devMode == "true" || devMode == "1" {
 		return "https://stgscc.suse.com"
 	}
 

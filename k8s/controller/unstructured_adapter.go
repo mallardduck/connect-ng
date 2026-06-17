@@ -293,11 +293,6 @@ func (s *UnstructuredSpec) GetOfflineCertificateRef() *corev1.SecretReference {
 	return ref
 }
 
-func (s *UnstructuredSpec) GetSCCURL() string {
-	url, _, _ := unstructured.NestedString(s.data, "sccURL")
-	return url
-}
-
 func (s *UnstructuredSpec) GetSyncNow() bool {
 	syncNow, found, _ := unstructured.NestedBool(s.data, "syncNow")
 	return found && syncNow

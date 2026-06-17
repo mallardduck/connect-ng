@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/SUSE/connect-ng/k8s/consts"
 	"github.com/SUSE/connect-ng/k8s/scclient"
 	"github.com/SUSE/connect-ng/k8s/types"
 	corev1 "k8s.io/api/core/v1"
@@ -156,7 +157,7 @@ func (h *OfflineHandler) Register(ctx context.Context, obj types.ProductRegistra
 
 	// 2. Extract architecture from metrics (or use "unknown" if not present)
 	arch := "unknown"
-	if archValue, ok := metricsData["arch"]; ok {
+	if archValue, ok := metricsData[consts.MetricsKeyArch]; ok {
 		if archStr, ok := archValue.(string); ok {
 			arch = archStr
 		}
@@ -203,7 +204,7 @@ func (h *OfflineHandler) Activate(ctx context.Context, obj types.ProductRegistra
 		return fmt.Errorf("offline certificate secret reference not set")
 	}
 
-	certData, err := h.fetchSecretData(ctx, certRef, "certificate")
+	certData, err := h.fetchSecretData(ctx, certRef, consts.SecretKeyCertificate)
 	if err != nil {
 		return fmt.Errorf("failed to fetch certificate: %w", err)
 	}
@@ -276,6 +277,66 @@ func (h *OfflineHandler) ReconcileKeepaliveError(ctx context.Context, obj types.
 	return obj
 }
 
+// Preprocessing Methods
+
+// NeedsPreprocessRegistration checks if the registration needs preprocessing.
+// For offline mode, this happens when:
+// 1. User removed offline certificate after activation (to retry with new cert)
+// 2. User removed failed certificate (to fix and retry)
+// Based on SCC Operator's offline handler.
+func (h *OfflineHandler) NeedsPreprocessRegistration(ctx context.Context, obj types.ProductRegistrationObject) bool {
+	spec := obj.GetSpec()
+	status := obj.GetStatus()
+
+	// Check if user removed cert after activation (wants to retry)
+	activatedButMissingCert := status.GetActivated() && spec.GetOfflineCertificateRef() == nil
+
+	// Check if user removed failed cert (wants to fix and retry)
+	// Failure condition is true AND OfflineCertificateReady is false AND cert ref is nil
+	failedCertRemoved := false
+	if status.IsConditionTrue("Failure") {
+		// Check if OfflineCertificateReady condition exists and is false, and cert was removed
+		if status.HasCondition("OfflineCertificateReady") &&
+			!status.IsConditionTrue("OfflineCertificateReady") &&
+			spec.GetOfflineCertificateRef() == nil {
+			failedCertRemoved = true
+		}
+	}
+
+	return activatedButMissingCert || failedCertRemoved
+}
+
+// PreprocessRegistration performs preprocessing on the registration.
+// For offline mode, this resets the registration state to allow re-activation.
+// Based on SCC Operator's offline handler.
+func (h *OfflineHandler) PreprocessRegistration(ctx context.Context, obj types.ProductRegistrationObject) (types.ProductRegistrationObject, error) {
+	return h.ResetToReadyForActivation(ctx, obj)
+}
+
+// ResetToReadyForActivation resets the registration state to allow re-activation.
+// Used when user removes offline certificate to retry, or when syncNow is triggered.
+// Based on SCC Operator's offline handler.
+func (h *OfflineHandler) ResetToReadyForActivation(ctx context.Context, obj types.ProductRegistrationObject) (types.ProductRegistrationObject, error) {
+	status := obj.GetStatus()
+
+	// Clear activation status
+	status.SetActivated(false)
+	now := metav1.Now()
+	status.SetLastValidatedTS(&now) // Reset to zero time
+
+	// Remove existing conditions
+	status.RemoveCondition("Activated")
+	status.RemoveCondition("OfflineCertificateReady")
+	status.RemoveCondition("Failure")
+	status.RemoveCondition("Ready")
+
+	// Set Progressing condition
+	status.SetCondition("Progressing", metav1.ConditionTrue, "Resetting", "Resetting registration for re-activation")
+
+	// Call PrepareRegisteredForActivation to set up proper state
+	return h.PrepareRegisteredForActivation(ctx, obj)
+}
+
 // Helper Methods
 
 // createOfflineRequestSecret creates a secret containing the offline registration request XML.
@@ -285,19 +346,19 @@ func (h *OfflineHandler) createOfflineRequestSecret(ctx context.Context, obj typ
 		namespace = "default" // TODO: Make configurable
 	}
 
-	secretName := fmt.Sprintf("%s-offline-request", obj.GetName())
+	secretName := consts.OfflineRequestSecretName(obj.GetName())
 
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      secretName,
 			Namespace: namespace,
 			Labels: map[string]string{
-				"suse.com/offline-request": "true",
+				consts.LabelSecretRole: string(consts.SecretRoleOfflineRequest),
 			},
 		},
 		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
-			"request.xml": requestXML,
+			consts.SecretKeyRequestXML: requestXML,
 		},
 	}
 
@@ -364,10 +425,10 @@ func (h *OfflineHandler) fetchMetrics(ctx context.Context) (map[string]any, erro
 	}
 
 	// Extract the payload
-	payloadBytes, ok := secret.Data["payload"]
+	payloadBytes, ok := secret.Data[consts.SecretKeyPayload]
 	if !ok {
-		return nil, fmt.Errorf("metrics secret %s/%s missing 'payload' key",
-			h.config.MetricsSecretNamespace, h.config.MetricsSecretName)
+		return nil, fmt.Errorf("metrics secret %s/%s missing %q key",
+			h.config.MetricsSecretNamespace, h.config.MetricsSecretName, consts.SecretKeyPayload)
 	}
 
 	// Parse JSON payload
@@ -388,12 +449,12 @@ func (h *OfflineHandler) determineSCCURL(spec types.ProductRegistrationSpec) str
 	}
 
 	// 2. Check PRIME_SCC_REGISTRATION_HOST_URL env var (global override)
-	if primeURL := os.Getenv("PRIME_SCC_REGISTRATION_HOST_URL"); primeURL != "" {
+	if primeURL := os.Getenv(consts.EnvPrimeSCCRegistrationHostURL); primeURL != "" {
 		return primeURL
 	}
 
 	// 3. Check DEV_MODE for staging SCC
-	if devMode := os.Getenv("DEV_MODE"); devMode == "true" || devMode == "1" {
+	if devMode := os.Getenv(consts.EnvDevMode); devMode == "true" || devMode == "1" {
 		return "https://stgscc.suse.com"
 	}
 
