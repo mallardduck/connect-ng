@@ -8,3 +8,5 @@ bin
 *.tar.xz
 *.env*
 .mise.toml
+go.work
+go.work.sum

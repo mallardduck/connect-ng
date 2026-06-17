@@ -1,0 +1,64 @@
+# Offline Registration Example - For air-gapped environments
+
+# Step 1: Create entrypoint secret with offline mode
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rancher-scc-entrypoint-offline
+  namespace: cattle-system
+type: Opaque
+stringData:
+  registrationCode: "ENTER-YOUR-SCC-REGISTRATION-CODE-HERE"
+  mode: "offline"
+
+---
+# Step 2: Create ProductRegistration
+apiVersion: rancher.registration.suse.com/v1
+kind: ProductRegistration
+metadata:
+  name: rancher-registration-offline
+spec:
+  entrypointRef:
+    name: rancher-scc-entrypoint-offline
+    namespace: cattle-system
+
+# Offline Registration Workflow:
+#
+# 1. Controller generates offline registration request
+#    Status will show OfflineRequestReady condition
+#
+# 2. Retrieve the request file:
+#    kubectl get secret rancher-registration-offline-request -n cattle-system -o jsonpath='{.data.request}' | base64 -d > request.json
+#
+# 3. Submit request.json to SCC portal to get certificate
+#    https://scc.suse.com/offline-registration
+#
+# 4. Create secret with the certificate:
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rancher-offline-certificate
+  namespace: cattle-system
+type: Opaque
+stringData:
+  certificate: |
+    -----BEGIN CERTIFICATE-----
+    # Certificate content from SCC goes here
+    -----END CERTIFICATE-----
+
+# 5. Update entrypoint to reference certificate:
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rancher-scc-entrypoint-offline
+  namespace: cattle-system
+type: Opaque
+stringData:
+  registrationCode: "ENTER-YOUR-SCC-REGISTRATION-CODE-HERE"
+  mode: "offline"
+  certificateSecretName: "rancher-offline-certificate"  # Add this
+
+# 6. Controller will validate certificate and complete activation
+#    Status will show OfflineActivationDone condition
