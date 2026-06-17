@@ -72,6 +72,12 @@ replace (
 	github.com/SUSE/connect-ng/k8s => ../..
 )
 
-// Note: In production, consumers would use actual versioned dependencies:
-// github.com/SUSE/connect-ng/k8s v1.0.0
-// and remove the replace directives
+// Local development uses replace directives to work with unpublished code.
+//
+// In production, consumers would import versioned dependencies:
+//   github.com/SUSE/connect-ng/k8s v1.0.0
+// and remove the replace directives.
+//
+// Version flexibility: This example uses k8s.io v0.36.1 while the library
+// requires minimum v0.28.0. Go modules selects v0.36.1 (meets minimum).
+// Products choose their own k8s versions; library specifies minimums only.

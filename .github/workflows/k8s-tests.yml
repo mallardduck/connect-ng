@@ -1,0 +1,95 @@
+name: k8s module tests
+
+# Test k8s module against multiple Kubernetes versions to ensure
+# minimum version constraints work correctly across supported range
+
+on:
+  pull_request:
+    paths:
+      - 'k8s/**'
+      - '.github/workflows/k8s-tests.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'k8s/**'
+
+env:
+  GO_VERSION: '1.26'
+
+jobs:
+  test-k8s-versions:
+    name: Test with k8s ${{ matrix.k8s-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        k8s-version:
+          - "0.28.5"   # Minimum supported (k8s 1.28)
+          - "0.30.2"   # Mid-range (k8s 1.30)
+          - "0.36.1"   # Current latest (k8s 1.36)
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: k8s/go.sum
+
+      - name: Test k8s module with k8s.io v${{ matrix.k8s-version }}
+        working-directory: k8s
+        run: |
+          # Update k8s.io packages to test version
+          go get k8s.io/api@v${{ matrix.k8s-version }}
+          go get k8s.io/apimachinery@v${{ matrix.k8s-version }}
+          go mod tidy
+
+          # Run tests
+          go test ./...
+
+          # Verify build
+          go build ./...
+
+      - name: Test examples/rancher with k8s.io v${{ matrix.k8s-version }}
+        working-directory: k8s/examples/rancher
+        run: |
+          # Update k8s.io packages to test version
+          go get k8s.io/api@v${{ matrix.k8s-version }}
+          go get k8s.io/apimachinery@v${{ matrix.k8s-version }}
+
+          # Match controller-runtime to k8s version
+          # v0.28.x -> controller-runtime v0.16.x
+          # v0.30.x -> controller-runtime v0.18.x
+          # v0.36.x -> controller-runtime v0.24.x
+          if [[ "${{ matrix.k8s-version }}" == 0.28.* ]]; then
+            go get sigs.k8s.io/controller-runtime@v0.16.0
+          elif [[ "${{ matrix.k8s-version }}" == 0.30.* ]]; then
+            go get sigs.k8s.io/controller-runtime@v0.18.0
+          elif [[ "${{ matrix.k8s-version }}" == 0.36.* ]]; then
+            go get sigs.k8s.io/controller-runtime@v0.24.1
+          fi
+
+          go mod tidy
+
+          # Build example
+          go build .
+
+  lint:
+    name: Lint k8s module
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: k8s/go.sum
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          working-directory: k8s
+          args: --timeout=5m
