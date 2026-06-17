@@ -1,16 +1,20 @@
 package scc
 
-// This file triggers code generation for SCC registration CRDs.
+// DEPRECATED: This file used the old go:generate approach.
 //
-// Run: go generate ./...
+// The recommended approach is to create cmd/generate-scc-types/main.go instead:
 //
-// The generator will:
-//   1. Find Config in this package (config.go)
-//   2. Generate product-specific CRD types
-//   3. Output to ../../apis/<product>.registration.suse.com/v1/
+//   package main
 //
-// Then run controller-gen to generate DeepCopy and CRD manifests:
-//   controller-gen object paths=./apis/...
-//   controller-gen crd paths=./apis/... output:crd:dir=./config/crd
-
-//go:generate go run github.com/SUSE/connect-ng/k8s/cmd/generate
+//   import (
+//       "github.com/SUSE/connect-ng/k8s/codegen"
+//       "yourproduct/pkg/scc"
+//   )
+//
+//   func main() {
+//       codegen.Generate(scc.Config, nil)
+//   }
+//
+// Then run: go run ./cmd/generate-scc-types
+//
+// This ensures ProductConfig is the single source of truth without AST parsing.

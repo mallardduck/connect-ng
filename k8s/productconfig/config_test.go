@@ -81,6 +81,57 @@ func TestApplyDefaultsIdempotent(t *testing.T) {
 	}
 }
 
+func TestSCCProductIdentifier(t *testing.T) {
+	t.Run("defaults to Product", func(t *testing.T) {
+		cfg := New("rancher", "2.10.0", "cattle-system")
+
+		// SCCProductIdentifier should default to Product
+		if cfg.SCCProductIdentifier != cfg.Product {
+			t.Errorf("SCCProductIdentifier = %q, want %q (should default to Product)", cfg.SCCProductIdentifier, cfg.Product)
+		}
+		if cfg.SCCProductIdentifier != "rancher" {
+			t.Errorf("SCCProductIdentifier = %q, want %q", cfg.SCCProductIdentifier, "rancher")
+		}
+	})
+
+	t.Run("can be overridden for product variants", func(t *testing.T) {
+		cfg := New("rancher", "2.10.0", "cattle-system",
+			WithSCCProductIdentifier("rancher-prime"),
+		)
+
+		// Product should be used for K8s resources
+		if cfg.Product != "rancher" {
+			t.Errorf("Product = %q, want %q", cfg.Product, "rancher")
+		}
+
+		// SCCProductIdentifier should be the variant
+		if cfg.SCCProductIdentifier != "rancher-prime" {
+			t.Errorf("SCCProductIdentifier = %q, want %q", cfg.SCCProductIdentifier, "rancher-prime")
+		}
+
+		// Group should still be based on Product, not SCCProductIdentifier
+		expectedGroup := "rancher.registration.suse.com"
+		if cfg.Group != expectedGroup {
+			t.Errorf("Group = %q, want %q (should use Product, not SCCProductIdentifier)", cfg.Group, expectedGroup)
+		}
+	})
+
+	t.Run("struct literal with ApplyDefaults", func(t *testing.T) {
+		// Backward compatibility: struct literals still work
+		cfg := ProductConfig{
+			Product:   "neuvector",
+			Version:   "5.0.0",
+			Namespace: "neuvector-system",
+		}
+		cfg.ApplyDefaults()
+
+		// SCCProductIdentifier should default to Product
+		if cfg.SCCProductIdentifier != "neuvector" {
+			t.Errorf("SCCProductIdentifier = %q, want %q (should default after ApplyDefaults)", cfg.SCCProductIdentifier, "neuvector")
+		}
+	})
+}
+
 func TestValidate(t *testing.T) {
 	tests := []struct {
 		name    string

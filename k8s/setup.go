@@ -116,7 +116,7 @@ func Setup(mgr ctrl.Manager, cfg productconfig.ProductConfig, prototype types.Pr
 	handlerConfig := controller.HandlerConfig{
 		SecretClient:           mgr.GetClient(),
 		Scheme:                 mgr.GetScheme(),
-		ProductIdentifier:      cfg.Product,
+		ProductIdentifier:      cfg.SCCProductIdentifier, // Use SCC-specific identifier for API calls
 		ProductVersion:         cfg.Version,
 		CredentialsNamespace:   cfg.Namespace,
 		CredentialsSecretName:  credentialsSecretName,
@@ -206,7 +206,7 @@ func StartLifecycleManager(
 	handlerConfig := controller.HandlerConfig{
 		SecretClient:           mgr.GetClient(),
 		Scheme:                 mgr.GetScheme(),
-		ProductIdentifier:      cfg.Product,
+		ProductIdentifier:      cfg.SCCProductIdentifier, // Use SCC-specific identifier for API calls
 		ProductVersion:         cfg.Version,
 		CredentialsNamespace:   cfg.Namespace,
 		CredentialsSecretName:  credentialsSecretName,

@@ -12,7 +12,7 @@ type Option func(*ProductConfig)
 //   - Runtime: k8s.Setup(mgr, myproduct.SCCConfig.ToSetupConfig())
 //   - Codegen: generator automatically finds and loads it
 //
-// Example:
+// Example (basic):
 //
 //	// pkg/scc/config.go
 //	package scc
@@ -22,16 +22,29 @@ type Option func(*ProductConfig)
 //	    "github.com/rancher/rancher/pkg/version"
 //	)
 //
-//	var Config = productconfig.ProductConfig{
-//	    Product:           "rancher",
-//	    Version:           version.Version, // Use existing version constant
-//	    Namespace:         "cattle-system",
-//	    MetricsSecretName: "rancher-scc-metrics", // Externally populated by telemetry
-//	}
+//	var Config = productconfig.New("rancher", version.Version, "cattle-system",
+//	    productconfig.WithMetricsSecret("rancher-scc-metrics"),
+//	)
+//
+// Example (with SCC product variant):
+//
+//	// When the SCC product identifier differs from the base product
+//	var Config = productconfig.New("rancher", version.Version, "cattle-system",
+//	    productconfig.WithSCCProductIdentifier("rancher-prime"), // SCC API uses "rancher-prime"
+//	    productconfig.WithMetricsSecret("rancher-scc-metrics"),
+//	)
+//	// Result: K8s resources use "rancher", SCC API uses "rancher-prime"
 type ProductConfig struct {
-	// Product is the SCC product identifier (e.g., "rancher", "neuvector")
-	// This determines the API group: <product>.registration.suse.com
+	// Product is the base product identifier for Kubernetes resources (e.g., "rancher", "neuvector")
+	// Used for: API groups (<product>.registration.suse.com), secret names, CRD naming
+	// This should be consistent across all K8s resources for a given product
 	Product string `json:"product" yaml:"product"`
+
+	// SCCProductIdentifier is the product identifier sent to SCC API (e.g., "rancher-prime", "neuvector-enterprise")
+	// Defaults to Product if not specified.
+	// Use this when the SCC product variant differs from the base product identifier.
+	// Example: Product="rancher" for all K8s resources, SCCProductIdentifier="rancher-prime" for SCC API
+	SCCProductIdentifier string `json:"sccProductIdentifier,omitempty" yaml:"sccProductIdentifier,omitempty"`
 
 	// Version is the product version (e.g., "2.10.0")
 	// Can reference your existing version constant
@@ -81,8 +94,14 @@ func (c *ProductConfig) ApplyDefaults() {
 	if c.Group == "" {
 		c.Group = fmt.Sprintf("%s.registration.suse.com", c.Product)
 	}
+	if c.SCCProductIdentifier == "" {
+		c.SCCProductIdentifier = c.Product
+	}
 	if c.MetricsSecretNamespace == "" {
 		c.MetricsSecretNamespace = c.Namespace
+	}
+	if c.MetricsSecretName == "" {
+		c.MetricsSecretName = fmt.Sprintf("%s-scc-metrics", c.Product)
 	}
 	if c.GenerateOutputDir == "" {
 		c.GenerateOutputDir = fmt.Sprintf("./apis/%s/v1", c.Group)
@@ -120,6 +139,15 @@ func New(product, version, namespace string, opts ...Option) ProductConfig {
 func WithGroup(group string) Option {
 	return func(c *ProductConfig) {
 		c.Group = group
+	}
+}
+
+// WithSCCProductIdentifier sets the SCC product identifier for API calls.
+// Use this when the SCC product variant differs from the base product.
+// Example: WithSCCProductIdentifier("rancher-prime") when Product is "rancher"
+func WithSCCProductIdentifier(identifier string) Option {
+	return func(c *ProductConfig) {
+		c.SCCProductIdentifier = identifier
 	}
 }
 

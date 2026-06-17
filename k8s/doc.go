@@ -70,11 +70,21 @@
 //
 // For full control with compile-time type safety, generate and use typed CRDs:
 //
-// 1. Generate product-specific CRD types:
+// 1. Create a codegen program using your ProductConfig:
 //
-//	go run github.com/SUSE/connect-ng/k8s/cmd/generate \
-//	  --product <product-name> \
-//	  --output <output-dir>
+//	// cmd/generate-scc-types/main.go
+//	package main
+//
+//	import (
+//	    "github.com/SUSE/connect-ng/k8s/codegen"
+//	    "myproduct/pkg/scc"
+//	)
+//
+//	func main() {
+//	    codegen.Generate(scc.Config, nil)
+//	}
+//
+// Then run: go run ./cmd/generate-scc-types
 //
 // 2. Register types and create controller manually:
 //
@@ -123,7 +133,7 @@
 //   - controller: Reconciler and handler implementations
 //   - types: Interface definitions
 //   - api/v1: Shared type implementations
-//   - cmd/generate: Code generation tool (optional)
+//   - codegen: Code generation library
 //
 // # Examples
 //

@@ -21,10 +21,11 @@ import (
 // from your actual version constant or CLI flag.
 // In main.go: cfg := scc.Config; cfg.Version = actualVersion
 var Config = productconfig.New(
-	"rancher",       // product
+	"rancher",       // product - used for K8s resources (API group, secret names, etc.)
 	"0.0.0-dev",     // version (override at runtime)
 	"cattle-system", // namespace
 	productconfig.WithMetricsSecret("rancher-scc-metrics"),
+	// productconfig.WithSCCProductIdentifier("rancher-prime"), // Optional: for product variants (e.g., Rancher Prime)
 	// productconfig.WithGroup("custom.registration.example.com"), // Optional: custom API group
 )
 
