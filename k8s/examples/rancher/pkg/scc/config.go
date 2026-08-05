@@ -25,8 +25,10 @@ var Config = productconfig.New(
 	"0.0.0-dev",     // version (override at runtime)
 	"cattle-system", // namespace
 	productconfig.WithMetricsSecret("rancher-scc-metrics"),
+	productconfig.WithGenerateOutputDir("./pkg/apis"),
+	productconfig.WithShortNames("rancherreg", "rreg"),
+	// productconfig.WithSkipSchemeBuilder(), // Optional: use this if using Wrangler's controller-gen
 	// productconfig.WithSCCProductIdentifier("rancher-prime"), // Optional: for product variants (e.g., Rancher Prime)
-	// productconfig.WithGroup("custom.registration.example.com"), // Optional: custom API group
 )
 
 // Note: The rancher-scc-metrics secret is externally populated by Rancher's telemetry system.

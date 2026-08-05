@@ -70,9 +70,27 @@ type ProductConfig struct {
 	// Example: "rancher-scc-metrics"
 	MetricsSecretName string `json:"metricsSecretName,omitempty" yaml:"metricsSecretName,omitempty"`
 
-	// GenerateOutputDir is where codegen writes files (optional, for codegen only)
-	// Defaults to "./apis/<group>/v1"
+	// APIBaseDir is the base directory for generated API types (optional, for codegen only)
+	// The full path will be constructed as: <APIBaseDir>/<group>/v1
+	// Example: "./pkg/apis" results in "./pkg/apis/rancher.registration.suse.com/v1"
+	// Defaults to "./apis" if not specified.
+	// Note: GenerateOutputDir takes precedence if set (for full path control).
+	APIBaseDir string `json:"apiBaseDir,omitempty" yaml:"apiBaseDir,omitempty"`
+
+	// GenerateOutputDir is the full output path where codegen writes files (optional, for codegen only)
+	// When set, this overrides APIBaseDir and provides full control over the output location.
+	// If neither APIBaseDir nor GenerateOutputDir is set, defaults to "./apis/<group>/v1"
 	GenerateOutputDir string `json:"generateOutputDir,omitempty" yaml:"generateOutputDir,omitempty"`
+
+	// ShortNames are kubectl shorthand aliases for the CRD (optional, for codegen only)
+	// Example: []string{"rancherreg", "rreg"} allows "kubectl get rancherreg"
+	// Useful for disambiguating when multiple products use ProductRegistration in the same cluster
+	ShortNames []string `json:"shortNames,omitempty" yaml:"shortNames,omitempty"`
+
+	// SkipSchemeBuilder skips generating SchemeBuilder registration code in doc.go (optional, for codegen only)
+	// Set to true if using Wrangler's controller-gen, which generates its own SchemeBuilder in zz_generated.register.go
+	// Default (false) generates SchemeBuilder for use with kubebuilder's controller-gen
+	SkipSchemeBuilder bool `json:"skipSchemeBuilder,omitempty" yaml:"skipSchemeBuilder,omitempty"`
 }
 
 // Validate checks that required fields are set.
@@ -103,8 +121,17 @@ func (c *ProductConfig) ApplyDefaults() {
 	if c.MetricsSecretName == "" {
 		c.MetricsSecretName = fmt.Sprintf("%s-scc-metrics", c.Product)
 	}
+
+	// Handle codegen output directory:
+	// 1. If GenerateOutputDir is explicitly set, use it (full control)
+	// 2. Otherwise, construct from APIBaseDir + Group + version
+	// 3. If neither is set, default to "./apis"
 	if c.GenerateOutputDir == "" {
-		c.GenerateOutputDir = fmt.Sprintf("./apis/%s/v1", c.Group)
+		baseDir := c.APIBaseDir
+		if baseDir == "" {
+			baseDir = "./apis"
+		}
+		c.GenerateOutputDir = fmt.Sprintf("%s/%s/v1", baseDir, c.Group)
 	}
 }
 
@@ -167,11 +194,43 @@ func WithMetricsSecretNamespace(namespace string) Option {
 	}
 }
 
-// WithGenerateOutputDir sets the output directory for code generation.
-// Defaults to "./apis/<group>/v1" if not specified.
+// WithAPIBaseDir sets the base directory for generated API types.
+// The full output path will be constructed as: <baseDir>/<group>/v1
+// Example: WithAPIBaseDir("./pkg/apis") results in "./pkg/apis/rancher.registration.suse.com/v1"
+// This is the recommended way to customize the output location.
+func WithAPIBaseDir(baseDir string) Option {
+	return func(c *ProductConfig) {
+		c.APIBaseDir = baseDir
+	}
+}
+
+// WithGenerateOutputDir sets the full output directory path for code generation.
+// This provides complete control over the output location, overriding APIBaseDir.
+// Use WithAPIBaseDir() instead unless you need to specify the exact full path.
+// Defaults to "./apis/<group>/v1" if neither this nor APIBaseDir is specified.
 func WithGenerateOutputDir(dir string) Option {
 	return func(c *ProductConfig) {
 		c.GenerateOutputDir = dir
+	}
+}
+
+// WithShortNames sets kubectl shorthand aliases for the CRD.
+// Example: WithShortNames("rancherreg", "rreg") allows "kubectl get rancherreg"
+// This is useful when multiple products use ProductRegistration in the same cluster,
+// as the unqualified "kubectl get productregistration" will be ambiguous.
+func WithShortNames(names ...string) Option {
+	return func(c *ProductConfig) {
+		c.ShortNames = names
+	}
+}
+
+// WithSkipSchemeBuilder skips generating SchemeBuilder registration code.
+// Use this when using Wrangler's controller-gen, which generates its own
+// SchemeBuilder in zz_generated.register.go
+// By default (without this option), SchemeBuilder is generated for kubebuilder's controller-gen.
+func WithSkipSchemeBuilder() Option {
+	return func(c *ProductConfig) {
+		c.SkipSchemeBuilder = true
 	}
 }
 

@@ -90,7 +90,8 @@
 //
 //	import (
 //	    myproductv1 "github.com/myproduct/apis/myproduct.registration.suse.com/v1"
-//	    "github.com/SUSE/connect-ng/k8s/controller"
+//	    "github.com/SUSE/connect-ng/k8s/lifecycle"
+//	    "github.com/SUSE/connect-ng/k8s/reconciler"
 //	)
 //
 //	func main() {
@@ -99,7 +100,7 @@
 //
 //	    mgr, _ := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{Scheme: scheme})
 //
-//	    reconciler := controller.NewRegistrationReconciler(
+//	    rec := reconciler.NewRegistrationReconciler(
 //	        mgr.GetClient(),
 //	        mgr.GetScheme(),
 //	        schema.GroupVersionKind{
@@ -107,7 +108,7 @@
 //	            Version: "v1",
 //	            Kind:    "ProductRegistration",
 //	        },
-//	        controller.HandlerConfig{
+//	        lifecycle.HandlerConfig{
 //	            SecretClient:           mgr.GetClient(),
 //	            Scheme:                 mgr.GetScheme(),
 //	            ProductIdentifier:      "myproduct",
@@ -121,7 +122,7 @@
 //
 //	    ctrl.NewControllerManagedBy(mgr).
 //	        For(&myproductv1.ProductRegistration{}).
-//	        Complete(reconciler)
+//	        Complete(rec)
 //
 //	    mgr.Start(ctrl.SetupSignalHandler())
 //	}
@@ -129,9 +130,10 @@
 // # Packages
 //
 //   - Setup(): High-level one-liner setup (recommended)
-//   - scclient: SCC API client implementations
-//   - controller: Reconciler and handler implementations
-//   - types: Interface definitions
+//   - scc: SCC API client implementations
+//   - reconciler: Reconciler implementations (Level 1 - Full controllers)
+//   - lifecycle: Handler and driver implementations (Level 2 - Custom controllers)
+//   - contract: Interface definitions
 //   - api/v1: Shared type implementations
 //   - codegen: Code generation library
 //

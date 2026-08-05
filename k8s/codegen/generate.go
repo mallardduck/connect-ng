@@ -20,6 +20,12 @@ type TemplateData struct {
 
 	// Group is the API group (e.g., "rancher.registration.suse.com")
 	Group string
+
+	// ShortNames are kubectl aliases for the CRD (e.g., "rancherreg", "rreg")
+	ShortNames []string
+
+	// SkipSchemeBuilder skips generating SchemeBuilder code (for Wrangler users)
+	SkipSchemeBuilder bool
 }
 
 // GenerateOptions configures code generation behavior.
@@ -71,14 +77,18 @@ func Generate(cfg productconfig.ProductConfig, opts *GenerateOptions) error {
 		return fmt.Errorf("invalid product config: %w", err)
 	}
 
-	// Determine output directory
-	outputDir := opts.OutputDir
-	if outputDir == "" {
-		outputDir = cfg.GenerateOutputDir
+	// Determine base output directory
+	baseOutputDir := opts.OutputDir
+	if baseOutputDir == "" {
+		baseOutputDir = cfg.GenerateOutputDir
 	}
-	if outputDir == "" {
+	if baseOutputDir == "" {
 		return fmt.Errorf("output directory not specified (set in config or options)")
 	}
+
+	// Build full path: baseDir/group/version
+	// Example: ./pkg/apis/rancher.registration.suse.com/v1
+	outputDir := filepath.Join(baseOutputDir, cfg.Group, "v1")
 
 	// Create output directory
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
@@ -90,6 +100,8 @@ func Generate(cfg productconfig.ProductConfig, opts *GenerateOptions) error {
 		Product:              cfg.Product,
 		SCCProductIdentifier: cfg.SCCProductIdentifier,
 		Group:                cfg.Group,
+		ShortNames:           cfg.ShortNames,
+		SkipSchemeBuilder:    cfg.SkipSchemeBuilder,
 	}
 
 	// Find templates directory
@@ -100,9 +112,8 @@ func Generate(cfg productconfig.ProductConfig, opts *GenerateOptions) error {
 
 	// Template files to generate
 	templates := map[string]string{
-		"types.go.tmpl":        "productregistration_types.go",
-		"groupversion.go.tmpl": "groupversion_info.go",
-		"doc.go.tmpl":          "doc.go",
+		"types.go.tmpl": "productregistration_types.go",
+		"doc.go.tmpl":   "doc.go",
 	}
 
 	// Generate each file
@@ -120,11 +131,11 @@ func Generate(cfg productconfig.ProductConfig, opts *GenerateOptions) error {
 	}
 
 	if opts.Verbose {
-		fmt.Printf("\nSuccess! Generated types for product '%s' in %s\n", cfg.Product, outputDir)
+		fmt.Printf("\nSuccess! Generated wrapper type for product '%s' in %s\n", cfg.Product, outputDir)
 		fmt.Println("\nNext steps:")
-		fmt.Println("1. Run controller-gen to generate DeepCopy methods and CRD manifests:")
-		fmt.Printf("   controller-gen object:headerFile=hack/boilerplate.go.txt paths=%s/...\n", outputDir)
-		fmt.Printf("   controller-gen crd:crdVersions=v1 paths=%s/... output:crd:dir=config/crd/bases\n", outputDir)
+		fmt.Println("1. Run your codegen tooling to generate DeepCopy, List types, and CRDs:")
+		fmt.Println("   - Wrangler: go generate")
+		fmt.Printf("   - Kubebuilder: controller-gen object paths=%s/...\n", outputDir)
 		fmt.Println("2. Import the generated types in your controller code")
 	}
 
@@ -137,18 +148,21 @@ func findTemplatesDir() string {
 	// Try several possible locations relative to common execution contexts
 	candidates := []string{
 		// From connect-ng repo root
-		filepath.Join("k8s", "templates"),
+		filepath.Join("k8s", "codegen", "templates"),
 
 		// From k8s/ subdirectory
+		filepath.Join("codegen", "templates"),
+
+		// From codegen/ subdirectory
 		"templates",
 
 		// From product repo importing this library (go.mod will resolve to module cache)
 		// We need to look relative to this source file's location in the module cache
-		filepath.Join(getModuleRoot(), "templates"),
+		filepath.Join(getModuleRoot(), "codegen", "templates"),
 
 		// Fallback: relative to working directory
-		"../templates",
-		"../../templates",
+		filepath.Join("..", "codegen", "templates"),
+		filepath.Join("..", "..", "codegen", "templates"),
 	}
 
 	for _, dir := range candidates {
@@ -159,7 +173,7 @@ func findTemplatesDir() string {
 	}
 
 	// Default fallback - will likely fail but provides a clear error
-	return "templates"
+	return filepath.Join("codegen", "templates")
 }
 
 // getModuleRoot attempts to find the k8s module root by looking for go.mod
@@ -172,14 +186,14 @@ func getModuleRoot() string {
 	}
 
 	for {
-		// Check if this directory contains our module marker (templates dir)
-		templatesPath := filepath.Join(dir, "k8s", "templates")
+		// Check if this directory contains our module marker (codegen/templates dir)
+		templatesPath := filepath.Join(dir, "k8s", "codegen", "templates")
 		if _, err := os.Stat(templatesPath); err == nil {
 			return filepath.Join(dir, "k8s")
 		}
 
-		// Also check for just "templates" (if we're already in k8s/)
-		templatesPath = filepath.Join(dir, "templates")
+		// Also check for just "codegen/templates" (if we're already in k8s/)
+		templatesPath = filepath.Join(dir, "codegen", "templates")
 		if _, err := os.Stat(templatesPath); err == nil {
 			return dir
 		}

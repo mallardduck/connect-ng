@@ -1,0 +1,70 @@
+package lifecycle
+
+import (
+	"context"
+
+	"github.com/SUSE/connect-ng/k8s/contract"
+)
+
+// RegistrationHandler defines the interface for registration operations.
+// Works with ProductRegistrationObject (CRDs) via interfaces.
+//
+// Implementations: OnlineHandler, OfflineHandler
+// Based on scc-operator's SCCHandler interface.
+//
+// IMPORTANT: All methods modify the object in memory but do NOT save it.
+// The caller (reconciler) is responsible for persisting changes via client.Update().
+type RegistrationHandler interface {
+	// Decision Methods - determine what actions are needed
+
+	NeedsRegistration(ctx context.Context, obj contract.ProductRegistrationObject) bool
+	NeedsActivation(ctx context.Context, obj contract.ProductRegistrationObject) bool
+	ReadyForActivation(ctx context.Context, obj contract.ProductRegistrationObject) bool
+	NeedsKeepalive(ctx context.Context, obj contract.ProductRegistrationObject) bool
+	NeedsPreprocessRegistration(ctx context.Context, obj contract.ProductRegistrationObject) bool
+
+	// Preparation Methods - set up state before operations
+
+	PrepareForRegister(ctx context.Context, obj contract.ProductRegistrationObject) (contract.ProductRegistrationObject, error)
+	PrepareRegisteredForActivation(ctx context.Context, obj contract.ProductRegistrationObject) (contract.ProductRegistrationObject, error)
+	PrepareActivatedForKeepalive(ctx context.Context, obj contract.ProductRegistrationObject) (contract.ProductRegistrationObject, error)
+	PrepareKeepaliveSucceeded(ctx context.Context, obj contract.ProductRegistrationObject) (contract.ProductRegistrationObject, error)
+
+	// Preprocessing Methods - handle edge cases like user removing failed certificates
+
+	// PreprocessRegistration handles preprocessing when user removes certificates or resets state.
+	// Offline: Resets to ReadyForActivation when user removes cert to retry.
+	// Online: Currently no-op (future use).
+	PreprocessRegistration(ctx context.Context, obj contract.ProductRegistrationObject) (contract.ProductRegistrationObject, error)
+
+	// ResetToReadyForActivation resets the registration state to allow re-activation.
+	// Used when syncNow is triggered on a failed activation, or when user removes failed offline cert.
+	// Clears activation status and failure conditions, sets Progressing condition.
+	ResetToReadyForActivation(ctx context.Context, obj contract.ProductRegistrationObject) (contract.ProductRegistrationObject, error)
+
+	// Operation Methods - perform SCC interactions
+
+	// Register performs the initial system registration with SCC.
+	// Online: Calls SCC API, returns real system ID.
+	// Offline: Generates registration request XML, stores in secret, returns placeholder ID (-1).
+	Register(ctx context.Context, obj contract.ProductRegistrationObject) (systemID int, err error)
+
+	// Activate activates the system with SCC.
+	// Online: Calls SCC API to activate products.
+	// Offline: Validates that user has uploaded certificate to the referenced secret.
+	Activate(ctx context.Context, obj contract.ProductRegistrationObject) error
+
+	// Keepalive sends a heartbeat to SCC and validates system status.
+	// Online: Calls SCC API every ~20 hours to maintain registration.
+	// Offline: No-op (returns nil immediately).
+	Keepalive(ctx context.Context, obj contract.ProductRegistrationObject) error
+
+	// Deregister initiates the system's deregistration from SCC.
+	Deregister(ctx context.Context, obj contract.ProductRegistrationObject) error
+
+	// Error Reconciliation Methods - handle failures gracefully
+
+	ReconcileRegisterError(ctx context.Context, obj contract.ProductRegistrationObject, err error) contract.ProductRegistrationObject
+	ReconcileActivateError(ctx context.Context, obj contract.ProductRegistrationObject, err error) contract.ProductRegistrationObject
+	ReconcileKeepaliveError(ctx context.Context, obj contract.ProductRegistrationObject, err error) contract.ProductRegistrationObject
+}

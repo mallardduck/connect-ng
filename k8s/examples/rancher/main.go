@@ -12,13 +12,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	// Import the generated types - these were created by running:
-	// go run github.com/SUSE/connect-ng/k8s/cmd/generate \
-	//   --product rancher \
-	//   --output apis/rancher.registration.suse.com/v1
-	rancherv1 "github.com/SUSE/connect-ng/k8s/examples/rancher/apis/rancher.registration.suse.com/v1"
+	// go run ./cmd/generate-scc-types
+	rancherv1 "github.com/SUSE/connect-ng/k8s/examples/rancher/pkg/apis/rancher.registration.suse.com/v1"
 
-	// Import the library setup function
-	k8s "github.com/SUSE/connect-ng/k8s"
+	// Import the reconciler package (Level 1 batteries-included)
+	"github.com/SUSE/connect-ng/k8s/reconciler"
 
 	// Import our pure config (no dependencies on generated types)
 	"github.com/SUSE/connect-ng/k8s/examples/rancher/pkg/scc"
@@ -76,7 +74,7 @@ func main() {
 
 	// Setup SCC registration - returns both reconcilers
 	// Pass our typed CRD as the prototype - this gives us type safety!
-	regReconciler, entrypointReconciler, err := k8s.Setup(
+	regReconciler, entrypointReconciler, err := reconciler.Setup(
 		mgr,
 		productConfig,
 		&rancherv1.ProductRegistration{}, // Typed prototype - reconciler uses this type internally!
@@ -107,7 +105,7 @@ func main() {
 	// Start lifecycle manager for jitter-based keepalive scheduling
 	// This runs in a background goroutine and sets spec.syncNow when keepalive is needed
 	ctx := ctrl.SetupSignalHandler()
-	go k8s.StartLifecycleManager(
+	go reconciler.StartLifecycleManager(
 		ctx,
 		mgr,
 		productConfig,

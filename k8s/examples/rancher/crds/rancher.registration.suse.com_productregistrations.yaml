@@ -11,25 +11,28 @@ spec:
     kind: ProductRegistration
     listKind: ProductRegistrationList
     plural: productregistrations
+    shortNames:
+    - rancherreg
+    - rreg
     singular: productregistration
   scope: Cluster
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .status.activated
-      name: Activated
+    - jsonPath: .spec.mode
+      name: Mode
+      type: string
+    - jsonPath: .status.activationStatus.activated
+      name: Registration Active
       type: boolean
     - jsonPath: .status.sccSystemID
       name: System ID
       type: integer
-    - jsonPath: .status.lastSync
+    - jsonPath: .status.activationStatus.lastValidatedTS
       name: Last Sync
       type: date
     name: v1
     schema:
       openAPIV3Schema:
-        description: |-
-          ProductRegistration is the Schema for the productregistrations API.
-          It embeds the common Spec and Status types from the library.
         properties:
           apiVersion:
             description: |-
@@ -52,14 +55,21 @@ spec:
             description: |-
               ProductRegistrationSpec defines the desired state of ProductRegistration.
               This spec is common across all products using the registration library.
+              Based on scc-operator's RegistrationSpec.
             properties:
-              entrypointRef:
+              mode:
+                default: online
+                description: Mode determines the registration workflow (online or
+                  offline).
+                enum:
+                - online
+                - offline
+                type: string
+              offlineRegistrationCertificateSecretRef:
                 description: |-
-                  EntrypointRef points to the Secret containing registration configuration.
-                  The secret should contain:
-                  - registrationCode: SCC registration code (required)
-                  - mode: "online" or "offline" (optional, defaults to "online")
-                  - registrationURL: custom SCC URL (optional)
+                  OfflineRegistrationCertificateSecretRef points to the Secret containing
+                  the certificate uploaded by the user in offline mode.
+                  Only relevant when Mode is "offline".
                 properties:
                   name:
                     description: name is unique within a namespace to reference a
@@ -71,20 +81,87 @@ spec:
                     type: string
                 type: object
                 x-kubernetes-map-type: atomic
-            required:
-            - entrypointRef
+              registrationRequest:
+                description: RegistrationRequest contains references to secrets with
+                  registration data.
+                properties:
+                  registrationAPICertificateSecretRef:
+                    description: |-
+                      RegistrationAPICertificateSecretRef points to a Secret containing a custom CA certificate.
+                      Used when RegistrationAPIUrl points to a server with custom TLS certificate.
+                      The secret should have a key "ca.crt" with the PEM-encoded certificate.
+                    properties:
+                      name:
+                        description: name is unique within a namespace to reference
+                          a secret resource.
+                        type: string
+                      namespace:
+                        description: namespace defines the space within which the
+                          secret name must be unique.
+                        type: string
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  registrationAPIUrl:
+                    description: |-
+                      RegistrationAPIUrl is a custom SCC URL (e.g., for RMT proxy).
+                      If nil, uses default SCC.
+                    type: string
+                  registrationCodeSecretRef:
+                    description: |-
+                      RegistrationCodeSecretRef points to the Secret containing the SCC registration code.
+                      The secret should have a key "registrationCode" with the code value.
+                      May be nil for BAYG/RMT scenarios or offline mode.
+                    properties:
+                      name:
+                        description: name is unique within a namespace to reference
+                          a secret resource.
+                        type: string
+                      namespace:
+                        description: namespace defines the space within which the
+                          secret name must be unique.
+                        type: string
+                    type: object
+                    x-kubernetes-map-type: atomic
+                type: object
+              syncNow:
+                description: |-
+                  SyncNow triggers an immediate sync when set to true.
+                  The controller will reset this to false after processing.
+                type: boolean
             type: object
           status:
             description: |-
               ProductRegistrationStatus defines the observed state of ProductRegistration.
               This status is common across all products using the registration library.
+              Based on scc-operator's RegistrationStatus.
             properties:
-              activated:
-                description: Activated indicates if products are activated
-                type: boolean
+              activationStatus:
+                description: ActivationStatus contains activation-related state.
+                properties:
+                  activated:
+                    default: false
+                    description: Activated indicates if the system is activated with
+                      SCC.
+                    type: boolean
+                  lastValidatedTS:
+                    description: LastValidatedTS is when the system was last validated
+                      (keepalive).
+                    format: date-time
+                    type: string
+                  systemURL:
+                    description: |-
+                      SystemURL is the SCC URL for this system (for UI links).
+                      Example: https://scc.suse.com/systems/12345
+                    type: string
+                required:
+                - activated
+                type: object
               conditions:
-                description: Conditions represent the latest available observations
-                  of the registration state
+                description: |-
+                  Conditions represent the latest available observations of the registration state.
+                  Standard conditions: Ready, Done, Progressing, Failure
+                  Registration conditions: RegistrationAnnounced, RegistrationSccUrlReady, RegistrationActivated, RegistrationKeepalive
+                  Offline conditions: OfflineRequestReady, OfflineCertificateReady, OfflineActivationDone
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -143,27 +220,96 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
-              expiresAt:
-                description: ExpiresAt is when the registration expires
-                format: date-time
-                type: string
-              lastSync:
-                description: LastSync is when we last synced with SCC
-                format: date-time
-                type: string
-              nextSync:
-                description: NextSync is when the next keepalive should occur
-                format: date-time
-                type: string
+              offlineRegistrationRequest:
+                description: |-
+                  OfflineRegistrationRequest points to the Secret containing the offline registration request XML.
+                  Only populated in offline mode.
+                properties:
+                  name:
+                    description: name is unique within a namespace to reference a
+                      secret resource.
+                    type: string
+                  namespace:
+                    description: namespace defines the space within which the secret
+                      name must be unique.
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
               registeredProduct:
-                description: RegisteredProduct is the product name from SCC
+                description: RegisteredProduct is the product name from SCC.
+                type: string
+              registrationExpiresAt:
+                description: RegistrationExpiresAt is when the registration expires.
+                format: date-time
+                type: string
+              registrationProcessedTS:
+                description: RegistrationProcessedTS is when the registration was
+                  last processed.
+                format: date-time
                 type: string
               sccSystemID:
-                description: SCCSystemID is the ID assigned by SCC after registration
+                description: |-
+                  SCCSystemID is the ID assigned by SCC after registration.
+                  Nil if not yet registered. -1 for offline mode.
                 type: integer
-              systemURL:
-                description: SystemURL is the SCC URL for this system (for UI links)
-                type: string
+              subscriptionInfo:
+                description: |-
+                  SubscriptionInfo contains metadata about the subscription from SCC.
+                  Populated by querying /connect/subscriptions/info during registration.
+                  Updated when syncNow is triggered.
+                properties:
+                  expiresAt:
+                    description: ExpiresAt is when the subscription expires
+                    format: date-time
+                    type: string
+                  kind:
+                    description: Kind is the subscription type (e.g., "full", "trial")
+                    type: string
+                  name:
+                    description: Name is the subscription name
+                    type: string
+                  productClasses:
+                    description: ProductClasses lists the product classes covered
+                      by this subscription
+                    items:
+                      description: ProductClassInfo describes a product class available
+                        under the subscription.
+                      properties:
+                        description:
+                          description: Description is a human-readable description
+                          type: string
+                        name:
+                          description: Name is the product class identifier (e.g.,
+                            "RANCHER-X86", "SLES-X86")
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                  startsAt:
+                    description: StartsAt is when the subscription becomes active
+                    format: date-time
+                    type: string
+                required:
+                - kind
+                - name
+                type: object
+              systemCredentialsSecretRef:
+                description: |-
+                  SystemCredentialsSecretRef points to the Secret containing SCC system credentials.
+                  Created by the controller after successful registration.
+                  Contains login/password for SCC API access.
+                properties:
+                  name:
+                    description: name is unique within a namespace to reference a
+                      secret resource.
+                    type: string
+                  namespace:
+                    description: namespace defines the space within which the secret
+                      name must be unique.
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
             type: object
         type: object
     served: true

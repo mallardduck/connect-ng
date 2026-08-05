@@ -1,0 +1,34 @@
+# Example GitHub Actions workflow for CI
+# This shows how to verify generated files are up to date
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  verify:
+    name: Verify Generated Files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      # Install controller-gen
+      - name: Install controller-gen
+        run: go install sigs.k8s.io/controller-tools/cmd/controller-gen@latest
+
+      # Verify DeepCopy generation is up to date
+      - name: Verify generated files
+        working-directory: k8s
+        run: make verify-generate
+
+      # Run tests
+      - name: Run tests
+        working-directory: k8s
+        run: make test

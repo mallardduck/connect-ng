@@ -132,6 +132,74 @@ func TestSCCProductIdentifier(t *testing.T) {
 	})
 }
 
+func TestAPIBaseDir(t *testing.T) {
+	t.Run("default uses ./apis", func(t *testing.T) {
+		cfg := New("testproduct", "1.0.0", "test-namespace")
+
+		expected := "./apis/testproduct.registration.suse.com/v1"
+		if cfg.GenerateOutputDir != expected {
+			t.Errorf("GenerateOutputDir = %q, want %q", cfg.GenerateOutputDir, expected)
+		}
+	})
+
+	t.Run("WithAPIBaseDir constructs full path", func(t *testing.T) {
+		cfg := New("testproduct", "1.0.0", "test-namespace",
+			WithAPIBaseDir("./pkg/apis"),
+		)
+
+		expected := "./pkg/apis/testproduct.registration.suse.com/v1"
+		if cfg.GenerateOutputDir != expected {
+			t.Errorf("GenerateOutputDir = %q, want %q", cfg.GenerateOutputDir, expected)
+		}
+	})
+
+	t.Run("WithAPIBaseDir with custom group", func(t *testing.T) {
+		cfg := New("testproduct", "1.0.0", "test-namespace",
+			WithGroup("custom.example.com"),
+			WithAPIBaseDir("./internal/apis"),
+		)
+
+		expected := "./internal/apis/custom.example.com/v1"
+		if cfg.GenerateOutputDir != expected {
+			t.Errorf("GenerateOutputDir = %q, want %q", cfg.GenerateOutputDir, expected)
+		}
+	})
+
+	t.Run("WithGenerateOutputDir provides full control", func(t *testing.T) {
+		cfg := New("testproduct", "1.0.0", "test-namespace",
+			WithGenerateOutputDir("./completely/custom/path"),
+		)
+
+		expected := "./completely/custom/path"
+		if cfg.GenerateOutputDir != expected {
+			t.Errorf("GenerateOutputDir = %q, want %q", cfg.GenerateOutputDir, expected)
+		}
+	})
+
+	t.Run("WithGenerateOutputDir takes precedence over WithAPIBaseDir", func(t *testing.T) {
+		cfg := New("testproduct", "1.0.0", "test-namespace",
+			WithAPIBaseDir("./pkg/apis"),
+			WithGenerateOutputDir("./override/path"),
+		)
+
+		// GenerateOutputDir should win
+		expected := "./override/path"
+		if cfg.GenerateOutputDir != expected {
+			t.Errorf("GenerateOutputDir = %q, want %q (should use GenerateOutputDir over APIBaseDir)", cfg.GenerateOutputDir, expected)
+		}
+	})
+
+	t.Run("APIBaseDir is stored for introspection", func(t *testing.T) {
+		cfg := New("testproduct", "1.0.0", "test-namespace",
+			WithAPIBaseDir("./pkg/apis"),
+		)
+
+		if cfg.APIBaseDir != "./pkg/apis" {
+			t.Errorf("APIBaseDir = %q, want %q", cfg.APIBaseDir, "./pkg/apis")
+		}
+	})
+}
+
 func TestValidate(t *testing.T) {
 	tests := []struct {
 		name    string

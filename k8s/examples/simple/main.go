@@ -7,8 +7,8 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
-	k8s "github.com/SUSE/connect-ng/k8s"
 	"github.com/SUSE/connect-ng/k8s/productconfig"
+	"github.com/SUSE/connect-ng/k8s/reconciler"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
@@ -39,13 +39,13 @@ func main() {
 
 	// Create unstructured prototype for the CRD type
 	// This example doesn't generate typed CRDs - uses unstructured wrapped in adapter
-	prototype, err := k8s.NewUnstructuredPrototype("myproduct.registration.suse.com")
+	prototype, err := reconciler.NewUnstructuredPrototype("myproduct.registration.suse.com")
 	if err != nil {
 		ctrl.Log.Error(err, "unable to create prototype")
 		os.Exit(1)
 	}
 
-	regReconciler, entrypointReconciler, err := k8s.Setup(
+	regReconciler, entrypointReconciler, err := reconciler.Setup(
 		mgr,
 		productconfig.ProductConfig{
 			Product:           "myproduct",             // Your product name

@@ -9,19 +9,9 @@
 package v1
 
 import (
+	"github.com/SUSE/connect-ng/k8s/api/primitives"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	"github.com/SUSE/connect-ng/k8s/types"
-)
-
-// RegistrationMode defines the registration workflow (online or offline).
-// +kubebuilder:validation:Enum=online;offline
-type RegistrationMode string
-
-const (
-	RegistrationModeOnline  RegistrationMode = "online"
-	RegistrationModeOffline RegistrationMode = "offline"
 )
 
 // RegistrationRequest contains references to secrets with registration data.
@@ -51,8 +41,9 @@ type RegistrationRequest struct {
 type ProductRegistrationSpec struct {
 	// Mode determines the registration workflow (online or offline).
 	// +kubebuilder:default="online"
+	// +kubebuilder:validation:Enum=online;offline
 	// +optional
-	Mode RegistrationMode `json:"mode,omitempty"`
+	Mode primitives.RegistrationMode `json:"mode,omitempty"`
 
 	// RegistrationRequest contains references to secrets with registration data.
 	// +optional
@@ -72,11 +63,11 @@ type ProductRegistrationSpec struct {
 
 // Interface implementation for types.ProductRegistrationSpec
 
-func (s *ProductRegistrationSpec) GetMode() types.RegistrationMode {
+func (s *ProductRegistrationSpec) GetMode() primitives.RegistrationMode {
 	if s.Mode == "" {
-		return types.RegistrationModeOnline // default
+		return primitives.RegistrationModeOnline // default
 	}
-	return types.RegistrationMode(s.Mode)
+	return s.Mode
 }
 
 func (s *ProductRegistrationSpec) GetRegistrationCodeRef() *corev1.SecretReference {
@@ -129,6 +120,37 @@ type SystemActivationState struct {
 	SystemURL *string `json:"systemURL,omitempty"`
 }
 
+// SubscriptionMetadata contains information about the subscription from SCC.
+// Maps to the SubscriptionInfo returned by /connect/subscriptions/info.
+type SubscriptionMetadata struct {
+	// Kind is the subscription type (e.g., "full", "trial")
+	Kind string `json:"kind"`
+
+	// Name is the subscription name
+	Name string `json:"name"`
+
+	// StartsAt is when the subscription becomes active
+	// +optional
+	StartsAt *metav1.Time `json:"startsAt,omitempty"`
+
+	// ExpiresAt is when the subscription expires
+	// +optional
+	ExpiresAt *metav1.Time `json:"expiresAt,omitempty"`
+
+	// ProductClasses lists the product classes covered by this subscription
+	ProductClasses []ProductClassInfo `json:"productClasses,omitempty"`
+}
+
+// ProductClassInfo describes a product class available under the subscription.
+type ProductClassInfo struct {
+	// Name is the product class identifier (e.g., "RANCHER-X86", "SLES-X86")
+	Name string `json:"name"`
+
+	// Description is a human-readable description
+	// +optional
+	Description string `json:"description,omitempty"`
+}
+
 // ProductRegistrationStatus defines the observed state of ProductRegistration.
 // This status is common across all products using the registration library.
 // Based on scc-operator's RegistrationStatus.
@@ -175,29 +197,15 @@ type ProductRegistrationStatus struct {
 	// Only populated in offline mode.
 	// +optional
 	OfflineRegistrationRequest *corev1.SecretReference `json:"offlineRegistrationRequest,omitempty"`
+
+	// SubscriptionInfo contains metadata about the subscription from SCC.
+	// Populated by querying /connect/subscriptions/info during registration.
+	// Updated when syncNow is triggered.
+	// +optional
+	SubscriptionInfo *SubscriptionMetadata `json:"subscriptionInfo,omitempty"`
 }
 
-// Condition types for ProductRegistration - standard across all products
-const (
-	// General conditions
-	ConditionTypeReady       = "Ready"
-	ConditionTypeDone        = "Done"
-	ConditionTypeProgressing = "Progressing"
-	ConditionTypeFailure     = "Failure"
-
-	// Registration conditions
-	ConditionTypeAnnounced = "RegistrationAnnounced"
-	ConditionTypeURLReady  = "RegistrationSccUrlReady"
-	ConditionTypeActivated = "RegistrationActivated"
-	ConditionTypeKeepalive = "RegistrationKeepalive"
-
-	// Offline conditions
-	ConditionTypeOfflineRequestReady     = "OfflineRequestReady"
-	ConditionTypeOfflineCertificateReady = "OfflineCertificateReady"
-	ConditionTypeOfflineActivationDone   = "OfflineActivationDone"
-)
-
-// Interface implementation for types.ProductRegistrationStatus
+// Interface implementation for contract.ProductRegistrationStatus
 
 // Condition Management
 
@@ -296,6 +304,14 @@ func (s *ProductRegistrationStatus) GetRegistrationExpiresAt() *metav1.Time {
 
 func (s *ProductRegistrationStatus) SetRegistrationExpiresAt(ts *metav1.Time) {
 	s.RegistrationExpiresAt = ts
+}
+
+func (s *ProductRegistrationStatus) GetSubscriptionInfo() *SubscriptionMetadata {
+	return s.SubscriptionInfo
+}
+
+func (s *ProductRegistrationStatus) SetSubscriptionInfo(info *SubscriptionMetadata) {
+	s.SubscriptionInfo = info
 }
 
 // Activation State

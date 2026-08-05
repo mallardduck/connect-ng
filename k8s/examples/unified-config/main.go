@@ -10,7 +10,7 @@ import (
 	// Import your SCC config package
 	"github.com/SUSE/connect-ng/k8s/examples/unified-config/pkg/scc"
 
-	k8s "github.com/SUSE/connect-ng/k8s"
+	"github.com/SUSE/connect-ng/k8s/reconciler"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
@@ -39,13 +39,13 @@ func main() {
 	// Create unstructured prototype
 	// For typed CRDs, generate them first with: go run github.com/SUSE/connect-ng/k8s/cmd/generate
 	// Then pass &myproductv1.ProductRegistration{} instead
-	prototype, err := k8s.NewUnstructuredPrototype(scc.Config.Group)
+	prototype, err := reconciler.NewUnstructuredPrototype(scc.Config.Group)
 	if err != nil {
 		ctrl.Log.Error(err, "unable to create prototype")
 		os.Exit(1)
 	}
 
-	regReconciler, entrypointReconciler, err := k8s.Setup(mgr, scc.Config, prototype)
+	regReconciler, entrypointReconciler, err := reconciler.Setup(mgr, scc.Config, prototype)
 	if err != nil {
 		ctrl.Log.Error(err, "unable to setup SCC registration")
 		os.Exit(1)

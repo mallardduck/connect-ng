@@ -1,0 +1,176 @@
+version: "2"
+
+run:
+  go: "1.26"
+
+linters:
+  default: none
+  enable:
+    - depguard
+    - errcheck
+    - gocritic
+    - gosec
+    - govet
+    - ineffassign
+    - misspell
+    - revive
+    - staticcheck
+    - unconvert
+    - unparam
+    - unused
+
+  settings:
+    depguard:
+      rules:
+        prevent-controller-runtime:
+          list-mode: lax
+          files:
+            - $all
+            - '!**/reconciler/**/*.go'
+            - '!**/setup.go'
+            - '!**/*_test.go'
+          allow:
+            - $gostd
+            - github.com/SUSE/connect-ng
+            - k8s.io/api
+            - k8s.io/apimachinery
+            - github.com/go-logr/logr
+            - sigs.k8s.io/controller-runtime/pkg/log
+          deny:
+            - pkg: sigs.k8s.io/controller-runtime
+              desc: Do not import controller-runtime directly. Use github.com/SUSE/connect-ng/k8s/client interface. Consumers provide adapters for their controller-runtime version.
+            - pkg: sigs.k8s.io/controller-runtime/pkg/client
+              desc: Use github.com/SUSE/connect-ng/k8s/client interface instead. This decouples the library from controller-runtime versions.
+            - pkg: sigs.k8s.io/controller-runtime/pkg/manager
+              desc: Manager is consumer-facing. Library code should use client.Client interface.
+            - pkg: sigs.k8s.io/controller-runtime/pkg/controller
+              desc: Controller setup is consumer-facing. Library provides reconcilers, not controllers.
+            - pkg: k8s.io/client-go/rest
+              desc: REST client has version-specific behavior. Use client.Client interface instead.
+            - pkg: k8s.io/client-go/kubernetes
+              desc: Typed client has tight version coupling. Use client.Client interface instead.
+            - pkg: k8s.io/client-go/dynamic
+              desc: Dynamic client has version-specific behavior. Use client.Client interface instead.
+            - pkg: k8s.io/apiextensions-apiserver
+              desc: Not needed in core library. CRD installation is consumer responsibility.
+            - pkg: k8s.io/code-generator
+              desc: Code generation is a build tool, not a runtime dependency.
+            - pkg: github.com/pkg/errors
+              desc: Use standard library errors (Go 1.13+) with fmt.Errorf and %w.
+            - pkg: gopkg.in/yaml.v2
+              desc: Use gopkg.in/yaml.v3 (or sigs.k8s.io/yaml for k8s types).
+            - pkg: golang.org/x/crypto/ssh/terminal
+              desc: Deprecated. Use golang.org/x/term instead.
+            - pkg: io/ioutil
+              desc: Deprecated in Go 1.16+. Use io and os packages directly.
+        reconciler-layer:
+          list-mode: lax
+          files:
+            - '**/reconciler/**/*.go'
+            - '**/setup.go'
+          allow:
+            - $gostd
+            - github.com/SUSE/connect-ng
+            - k8s.io/api
+            - k8s.io/apimachinery
+            - sigs.k8s.io/controller-runtime
+            - github.com/go-logr/logr
+    errcheck:
+      check-type-assertions: true
+      check-blank: false
+      exclude-functions:
+        - (io.Closer).Close
+    gocritic:
+      disabled-checks:
+        - ifElseChain
+        - hugeParam
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+    gosec:
+      excludes:
+        - G101
+        - G304
+    govet:
+      disable:
+        - fieldalignment
+        - shadow
+    staticcheck:
+      checks:
+        - all
+        - -SA1019
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: exported
+          arguments:
+            - checkPrivateReceivers
+            - disableStutteringCheck
+        - name: if-return
+        - name: increment-decrement
+        - name: var-naming
+        - name: var-declaration
+        - name: package-comments
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unused-parameter
+        - name: unreachable-code
+        - name: redefines-builtin-id
+
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - errcheck
+          - gosec
+          - unparam
+        path: _test\.go
+      - linters:
+          - depguard
+          - revive
+        path: zz_generated.*\.go
+      - linters:
+          - revive
+        path: _test\.go
+        text: should not use dot imports
+      - linters:
+          - revive
+        path: _test\.go
+        text: package-comments
+    paths:
+      - vendor
+      - .idea
+      - third_party$
+      - builtin$
+      - examples$
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/SUSE/connect-ng
